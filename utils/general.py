@@ -415,7 +415,8 @@ def check_requirements(requirements=ROOT / 'requirements.txt', exclude=(), insta
 
 
 def check_img_size(imgsz, s=32, floor=0):
-    # Verify image size is a multiple of stride s in each dimension
+    # Verify image size is a multiple of stride s in each dimension,
+    # if not change the imageZ to new_size
     if isinstance(imgsz, int):  # integer i.e. img_size=640
         new_size = max(make_divisible(imgsz, int(s)), floor)
     else:  # list i.e. img_size=[640, 480]
