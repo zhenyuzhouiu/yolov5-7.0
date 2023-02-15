@@ -61,6 +61,8 @@ from utils.plots import plot_evolve
 from utils.torch_utils import (EarlyStopping, ModelEMA, de_parallel, select_device, smart_DDP, smart_optimizer,
                                smart_resume, torch_distributed_zero_first)
 
+# os.getenv(key, default=None) get the os environment parameter by the key
+# if the key doesn't exit, then it will return the default value
 LOCAL_RANK = int(os.getenv('LOCAL_RANK', -1))  # https://pytorch.org/docs/stable/elastic/run.html
 RANK = int(os.getenv('RANK', -1))
 WORLD_SIZE = int(os.getenv('WORLD_SIZE', 1))
@@ -68,6 +70,14 @@ GIT_INFO = check_git_info()
 
 
 def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictionary
+    """
+
+    :param hyp: opt.hyp
+    :param opt:
+    :param device: gpu de number
+    :param callbacks: for register_hook()
+    :return:
+    """
     save_dir, epochs, batch_size, weights, single_cls, evolve, data, cfg, resume, noval, nosave, workers, freeze = \
         Path(opt.save_dir), opt.epochs, opt.batch_size, opt.weights, opt.single_cls, opt.evolve, opt.data, opt.cfg, \
         opt.resume, opt.noval, opt.nosave, opt.workers, opt.freeze
@@ -485,11 +495,13 @@ def main(opt, callbacks=Callbacks()):
         check_git_status()
         check_requirements()
 
+    # =============================== check file path, update opt
     # Resume (from specified or most recent last.pt)
     if opt.resume and not check_comet_resume(opt) and not opt.evolve:
         last = Path(check_file(opt.resume) if isinstance(opt.resume, str) else get_latest_run())
         opt_yaml = last.parent.parent / 'opt.yaml'  # train options yaml
         opt_data = opt.data  # original dataset
+        # using the opt.yaml hyperparameter yaml to update opt or the load checkpoint
         if opt_yaml.is_file():
             with open(opt_yaml, errors='ignore') as f:
                 d = yaml.safe_load(f)
@@ -632,5 +644,7 @@ def run(**kwargs):
 
 
 if __name__ == "__main__":
+    # train with pretrained weights with --weights yolov5m.pt
+    # or randomly initial weights with --weights '' --cfg yolov5m.yaml
     opt = parse_opt()
     main(opt)
