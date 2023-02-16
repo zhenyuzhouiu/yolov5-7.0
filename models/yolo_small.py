@@ -43,12 +43,13 @@ class Detect(nn.Module):
         """
         nc: number of classes
         anchors: lists
-        ch:
+        ch: input channels
         """
         super().__init__()
         self.nc = nc  # number of classes
         # nc, x, y, w, h, object
         self.no = nc + 5  # number of outputs per anchor
+        # anchors [[head1], [head2], [head3]], nl just the output head number
         self.nl = len(anchors)  # number of detection layers
         self.na = len(anchors[0]) // 2  # number of anchors
         # [0, 0, 0]
@@ -56,13 +57,18 @@ class Detect(nn.Module):
         # [0, 0, 0]
         self.anchor_grid = [torch.empty(0) for _ in range(self.nl)]  # init anchor grid
         self.register_buffer('anchors', torch.tensor(anchors).float().view(self.nl, -1, 2))  # shape(nl,na,2)
-        self.m = nn.ModuleList(nn.Conv2d(x, self.no * self.na, 1) for x in ch)  # output conv
+        self.m = nn.ModuleList(nn.Conv2d(x, self.no * self.na, 1) for x in ch)  # output conv # ch is a list []
         self.inplace = inplace  # use inplace ops (e.g. slice assignment)
 
     def forward(self, x):
+        """
+        :param x:
+        :return:
+        """
         z = []  # inference output
         for i in range(self.nl):
             x[i] = self.m[i](x[i])  # conv
+            # x[i].shape [bs, 3*(x+y+w+h+obj+nc),imgsz/strid, imgsz/strid]
             bs, _, ny, nx = x[i].shape  # x(bs,255,20,20) to x(bs,3,20,20,85)
             x[i] = x[i].view(bs, self.na, self.no, ny, nx).permute(0, 1, 3, 4, 2).contiguous()
 
@@ -303,12 +309,18 @@ class ClassificationModel(BaseModel):
 
 
 def parse_model(d, ch):  # model_dict, input_channels(3)
-    # Parse a YOLOv5 model.yaml dictionary
+    """
+    Parse a YOLOv5 model.yaml dictionary
+    :param d: dictionary
+    :param ch: list: it will append each layer input channels
+    :return:
+    """
     LOGGER.info(f"\n{'':>3}{'from':>18}{'n':>3}{'params':>10}  {'module':<40}{'arguments':<30}")
     anchors, nc, gd, gw, act = d['anchors'], d['nc'], d['depth_multiple'], d['width_multiple'], d.get('activation')
     if act:
         Conv.default_act = eval(act)  # redefine default activation, i.e. Conv.default_act = nn.SiLU()
         LOGGER.info(f"{colorstr('activation:')} {act}")  # print
+    # number of anchor for one output head
     na = (len(anchors[0]) // 2) if isinstance(anchors, list) else anchors  # number of anchors
     no = na * (nc + 5)  # number of outputs = anchors * (classes + 5)
 
@@ -319,6 +331,7 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
             with contextlib.suppress(NameError):
                 args[j] = eval(a) if isinstance(a, str) else a  # eval strings
 
+        # n is the number of repeat for module
         n = n_ = max(round(n * gd), 1) if n > 1 else n  # depth gain
         if m in {
                 Conv, GhostConv, Bottleneck, GhostBottleneck, SPP, SPPF, DWConv, MixConv2d, Focus, CrossConv,

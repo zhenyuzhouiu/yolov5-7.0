@@ -222,7 +222,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                                               prefix=colorstr('train: '),
                                               shuffle=True,
                                               seed=opt.seed)
-    labels = np.concatenate(dataset.labels, 0)
+    labels = np.concatenate(dataset.labels, 0)  # list to numpy.array()
     mlc = int(labels[:, 0].max())  # max label class
     assert mlc < nc, f'Label class {mlc} exceeds nc={nc} in {data}. Possible class labels are 0-{nc - 1}'
 
@@ -338,6 +338,8 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
             # autocast will automatically change to half float
             # but autocast can only contain the forward part
             with torch.cuda.amp.autocast(amp):
+                # list: [head1, head2, head3]
+                # head1.shape = [batch_size, num_anchor, imgsz/strid1, imagez/strid1, (x+y+w+h+obj+num_cls)]
                 pred = model(imgs)  # forward
                 loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
                 if RANK != -1:
