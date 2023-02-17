@@ -129,8 +129,11 @@ class ComputeLoss:
         tcls, tbox, indices, anchors = self.build_targets(p, targets)  # targets
 
         # Losses
+        # during training, p is a list when contain each output head
         for i, pi in enumerate(p):  # layer index, layer predictions
             b, a, gj, gi = indices[i]  # image, anchor, gridy, gridx
+            # pi.shape: [b, 3, imgsz/stride, imgsz/strid, 5+nc]
+            # tobj initialized with 0 represents non-object
             tobj = torch.zeros(pi.shape[:4], dtype=pi.dtype, device=self.device)  # target obj
 
             n = b.shape[0]  # number of targets

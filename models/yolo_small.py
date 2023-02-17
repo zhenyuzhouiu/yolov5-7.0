@@ -62,8 +62,9 @@ class Detect(nn.Module):
 
     def forward(self, x):
         """
-        :param x:
-        :return:
+        :param x: x.dtype = list
+        :return: training: return a list [head1, head2, head3], for each head [bs, 3, imgsz/stride, imgsz/stride, no)
+                 inference:
         """
         z = []  # inference output
         for i in range(self.nl):
