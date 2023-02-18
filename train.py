@@ -13,6 +13,8 @@ Usage - Multi-GPU DDP training:
 Models:     https://github.com/ultralytics/yolov5/tree/master/models
 Datasets:   https://github.com/ultralytics/yolov5/tree/master/data
 Tutorial:   https://github.com/ultralytics/yolov5/wiki/Train-Custom-Data
+            https://blog.csdn.net/qq_37541097/article/details/123594351
+            https://www.bilibili.com/video/BV1T3411p7zR/?spm_id_from=333.999.0.0&vd_source=4b207536257fbd654b1fa9fed2b9a420
 """
 
 import argparse

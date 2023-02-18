@@ -89,6 +89,12 @@ class QFocalLoss(nn.Module):
 
 
 class ComputeLoss:
+    """
+    bx = (2*sigmoid(tx)-0.5)+cx (-0.5, 1.5)
+    by = (2*sigmoid(ty)-0.5)+cy (-0.5, 1.5)
+    bw = pw*(2*sigmoid(tw))^2 (0, 4)
+    bh = ph*(2*sigmoid(th))^2 (0, 4)
+    """
     sort_obj_iou = False
 
     # Compute losses
@@ -113,7 +119,7 @@ class ComputeLoss:
 
         m = de_parallel(model).model[-1]  # Detect() module
         # dictionary.get(keyname, value) if the key doesn't exit, it will return the value
-        self.balance = {3: [4.0, 1.0, 0.4]}.get(m.nl, [4.0, 1.0, 0.25, 0.06, 0.02])  # P3-P7
+        self.balance = {3: [4.0, 1.0, 0.4]}.get(m.nl, [4.0, 1.0, 0.25, 0.06, 0.02])  # P3-P7 balance different head loss
         self.ssi = list(m.stride).index(16) if autobalance else 0  # stride 16 index
         self.BCEcls, self.BCEobj, self.gr, self.hyp, self.autobalance = BCEcls, BCEobj, 1.0, h, autobalance
         self.na = m.na  # number of anchors
@@ -182,13 +188,18 @@ class ComputeLoss:
         return (lbox + lobj + lcls) * bs, torch.cat((lbox, lobj, lcls)).detach()
 
     def build_targets(self, p, targets):
-        # Build targets for compute_loss(), input targets(image,class,x,y,w,h)
+        # Build targets for compute_loss(), input targets(image,class,x,y,w,h) with shape [nt, 6]
+        # na = 3
         na, nt = self.na, targets.shape[0]  # number of anchors, targets
         tcls, tbox, indices, anch = [], [], [], []
+        # 7 represents (image, class, x, y, w, h, anchor_index)
         gain = torch.ones(7, device=self.device)  # normalized to gridspace gain
+        # ai.shape: (na, nt)
         ai = torch.arange(na, device=self.device).float().view(na, 1).repeat(1, nt)  # same as .repeat_interleave(nt)
+        # targets.shape: [na, nt, (image, class, x, y, w, h ,anchor)]
         targets = torch.cat((targets.repeat(na, 1, 1), ai[..., None]), 2)  # append anchor indices
 
+        # (-0.5, 1.5)
         g = 0.5  # bias
         off = torch.tensor(
             [
@@ -202,24 +213,30 @@ class ComputeLoss:
             device=self.device).float() * g  # offsets
 
         for i in range(self.nl):
-            anchors, shape = self.anchors[i], p[i].shape
-            gain[2:6] = torch.tensor(shape)[[3, 2, 3, 2]]  # xyxy gain
+            # anchors and p are result lists from each head
+            anchors, shape = self.anchors[i], p[i].shape  # p[i].shape: [bs, 3, imgsz/stride, imgsz/stride, 5+nc]
+            # [3, 2, 3, 2] is the index for [imgsz/stride, imgsz/stride, imgsz/stride, imgsz/stride]
+            gain[2:6] = torch.tensor(shape)[[3, 2, 3, 2]]  # xyxy gain for affining to feature map
 
             # Match targets to anchors
-            t = targets * gain  # shape(3,n,7)
+            # affine ground truth to feature map
+            t = targets * gain  # shape(3,n,7), then the origin of coordinates t is the left upper
             if nt:
-                # Matches
+                # Matches by gtw/aw and gth/ah smaller than anchor_t
                 r = t[..., 4:6] / anchors[:, None]  # wh ratio
-                j = torch.max(r, 1 / r).max(2)[0] < self.hyp['anchor_t']  # compare
+                # check the r and 1/r whether smaller than hpy['anchor_t']
+                # compare: tensor.max(dim=None, keepdim=False) return values, indices
+                j = torch.max(r, 1 / r).max(2)[0] < self.hyp['anchor_t']
                 # j = wh_iou(anchors, t[:, 4:6]) > model.hyp['iou_t']  # iou(3,n)=wh_iou(anchors(3,2), gwh(n,2))
                 t = t[j]  # filter
 
-                # Offsets
+                # Offsets https://blog.csdn.net/qq_37541097/article/details/123594351
                 gxy = t[:, 2:4]  # grid xy
                 gxi = gain[[2, 3]] - gxy  # inverse
                 j, k = ((gxy % 1 < g) & (gxy > 1)).T
-                l, m = ((gxi % 1 < g) & (gxi > 1)).T
-                j = torch.stack((torch.ones_like(j), j, k, l, m))
+                l, m = ((gxi % 1 < g) & (gxi > 1)).T  # to check the center point at the upper part or lower part
+                j = torch.stack((torch.ones_like(j), j, k, l, m))  # [5, number_gt]
+                # input t.shape = [number_gt, 7] output t.shape
                 t = t.repeat((5, 1, 1))[j]
                 offsets = (torch.zeros_like(gxy)[None] + off[:, None])[j]
             else:
@@ -227,6 +244,7 @@ class ComputeLoss:
                 offsets = 0
 
             # Define
+            # tensor.chunk(chunks, dim=1)
             bc, gxy, gwh, a = t.chunk(4, 1)  # (image, class), grid xy, grid wh, anchors
             a, (b, c) = a.long().view(-1), bc.long().T  # anchors, image, class
             gij = (gxy - offsets).long()

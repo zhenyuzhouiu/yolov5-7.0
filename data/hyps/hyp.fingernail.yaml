@@ -11,7 +11,7 @@ cls_pw: 1.0
 obj: 1.0
 obj_pw: 1.0
 iou_t: 0.2
-anchor_t: 4.0
+anchor_t: 4.0 # On the predicted bw = pw*(2*sigmoid(tw))^2, (2*sigmoid(tw))^2 values belong (0, 4).
 fl_gamma: 2.0
 hsv_h: 0.015
 hsv_s: 0.7
