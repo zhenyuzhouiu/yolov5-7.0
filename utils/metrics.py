@@ -220,6 +220,20 @@ class ConfusionMatrix:
 
 
 def bbox_iou(box1, box2, xywh=True, GIoU=False, DIoU=False, CIoU=False, eps=1e-7):
+    """
+    As for the input box1 and box2, their values contain (x, y, w, h)
+    pxy = pxy.sigmoid() * 2 - 0.5  # relative to each grid cell (-0.5, 1.5)
+    pwh = (pwh.sigmoid() * 2) ** 2 * anchors[i]  # absolute width and height value
+    pbox = torch.cat((pxy, pwh), 1)  # predicted box
+    :param box1:
+    :param box2:
+    :param xywh:
+    :param GIoU:
+    :param DIoU:
+    :param CIoU:
+    :param eps:
+    :return:
+    """
     # Returns Intersection over Union (IoU) of box1(1,4) to box2(n,4)
 
     # Get the coordinates of bounding boxes

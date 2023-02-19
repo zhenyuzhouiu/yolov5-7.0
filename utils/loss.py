@@ -129,43 +129,57 @@ class ComputeLoss:
         self.device = device
 
     def __call__(self, p, targets):  # predictions, targets
+        """
+        :param p:
+        :param targets:
+        :return:
+        """
         lcls = torch.zeros(1, device=self.device)  # class loss
         lbox = torch.zeros(1, device=self.device)  # box loss
         lobj = torch.zeros(1, device=self.device)  # object loss
+        # indices [image batch id, anchor id, gj, gi]
         tcls, tbox, indices, anchors = self.build_targets(p, targets)  # targets
 
         # Losses
         # during training, p is a list when contain each output head
         for i, pi in enumerate(p):  # layer index, layer predictions
-            b, a, gj, gi = indices[i]  # image, anchor, gridy, gridx
-            # pi.shape: [b, 3, imgsz/stride, imgsz/strid, 5+nc]
+            b, a, gj, gi = indices[i]  # image, anchor_index, gridy, gridx
+            # pi.shape: [b, 3, imgsz/stride, imgsz/stride, 5+nc]
             # tobj initialized with 0 represents non-object
             tobj = torch.zeros(pi.shape[:4], dtype=pi.dtype, device=self.device)  # target obj
 
-            n = b.shape[0]  # number of targets
+            n = b.shape[0]  # number of objects
             if n:
                 # pxy, pwh, _, pcls = pi[b, a, gj, gi].tensor_split((2, 4, 5), dim=1)  # faster, requires torch 1.8.0
                 pxy, pwh, _, pcls = pi[b, a, gj, gi].split((2, 2, 1, self.nc), 1)  # target-subset of predictions
 
-                # Regression
-                pxy = pxy.sigmoid() * 2 - 0.5
-                pwh = (pwh.sigmoid() * 2) ** 2 * anchors[i]
+                # Regression for bounding box with CIoU loss
+                pxy = pxy.sigmoid() * 2 - 0.5  # relative to each grid cell (-0.5, 1.5)
+                pwh = (pwh.sigmoid() * 2) ** 2 * anchors[i]  # absolute width and height value
                 pbox = torch.cat((pxy, pwh), 1)  # predicted box
+                # pbox.shape = tbox[i].shape = [num_gt, 4]
                 iou = bbox_iou(pbox, tbox[i], CIoU=True).squeeze()  # iou(prediction, target)
                 lbox += (1.0 - iou).mean()  # iou loss
 
                 # Objectness
                 iou = iou.detach().clamp(0).type(tobj.dtype)
+                # sort_obj_iou default value is False
                 if self.sort_obj_iou:
                     j = iou.argsort()
                     b, a, gj, gi, iou = b[j], a[j], gj[j], gi[j], iou[j]
+                # gr default value is 1.0
                 if self.gr < 1:
                     iou = (1.0 - self.gr) + self.gr * iou
-                tobj[b, a, gj, gi] = iou  # iou ratio
+                # tobj initialized with torch.zeros(pi.shape[:4], dtype=pi.dtype, device=self.device)
+                tobj[b, a, gj, gi] = iou  # iou ratio for objectness loss
 
                 # Classification
+                # Because object loss can be updated for one class
                 if self.nc > 1:  # cls loss (only if multiple classes)
+                    # self.cn default value is 0.0
+                    # def full_like(input: Tensor, fill_value: int | float | bool)
                     t = torch.full_like(pcls, self.cn, device=self.device)  # targets
+                    # the default value of self.cp is 1.0
                     t[range(n), tcls[i]] = self.cp
                     lcls += self.BCEcls(pcls, t)  # BCE
 
@@ -188,6 +202,14 @@ class ComputeLoss:
         return (lbox + lobj + lcls) * bs, torch.cat((lbox, lobj, lcls)).detach()
 
     def build_targets(self, p, targets):
+        """
+        :param p: list
+        :param targets: list targets(image,class,x,y,w,h) with shape [nt, 6] x, y, w, h is ratio value
+        :return: indices.append((b, a, gj.clamp_(0, shape[2] - 1), gi.clamp_(0, shape[3] - 1)))  # image, anchor, grid
+                 tbox.append(torch.cat((gxy - gij, gwh), 1))  gxy-gij is tx and ty gwh is absolute value
+                 anch.append(anchors[a])  # anchors
+                 tcls.append(c)  # class
+        """
         # Build targets for compute_loss(), input targets(image,class,x,y,w,h) with shape [nt, 6]
         # na = 3
         na, nt = self.na, targets.shape[0]  # number of anchors, targets
@@ -228,17 +250,17 @@ class ComputeLoss:
                 # compare: tensor.max(dim=None, keepdim=False) return values, indices
                 j = torch.max(r, 1 / r).max(2)[0] < self.hyp['anchor_t']
                 # j = wh_iou(anchors, t[:, 4:6]) > model.hyp['iou_t']  # iou(3,n)=wh_iou(anchors(3,2), gwh(n,2))
-                t = t[j]  # filter
+                t = t[j]  # filter anchor,
 
                 # Offsets https://blog.csdn.net/qq_37541097/article/details/123594351
-                gxy = t[:, 2:4]  # grid xy
+                gxy = t[:, 2:4]  # grid xy shape=[after_anchor_filter, 2]
                 gxi = gain[[2, 3]] - gxy  # inverse
                 j, k = ((gxy % 1 < g) & (gxy > 1)).T
                 l, m = ((gxi % 1 < g) & (gxi > 1)).T  # to check the center point at the upper part or lower part
-                j = torch.stack((torch.ones_like(j), j, k, l, m))  # [5, number_gt]
-                # input t.shape = [number_gt, 7] output t.shape
-                t = t.repeat((5, 1, 1))[j]
-                offsets = (torch.zeros_like(gxy)[None] + off[:, None])[j]
+                j = torch.stack((torch.ones_like(j), j, k, l, m))  # [5, after_anchor_filter]
+                # input t.shape = [after_anchor_filter, 7] output t.shape
+                t = t.repeat((5, 1, 1))[j]  # 5 represents center, up, down, right, left, after selecting ground truth cell
+                offsets = (torch.zeros_like(gxy)[None] + off[:, None])[j]  # When use None as index, it will unsqueeze() or expand_dims()
             else:
                 t = targets[0]
                 offsets = 0
@@ -251,7 +273,10 @@ class ComputeLoss:
             gi, gj = gij.T  # grid indices
 
             # Append
+            # b: image batch id, a: anchor id, gj: ground truth cell j incex, gi: ground truth cell i index
             indices.append((b, a, gj.clamp_(0, shape[2] - 1), gi.clamp_(0, shape[3] - 1)))  # image, anchor, grid
+            # gxy is relative to each grid cell, belong [0, 1]
+            # gwh is the absolute length from t = targets * gain
             tbox.append(torch.cat((gxy - gij, gwh), 1))  # box
             anch.append(anchors[a])  # anchors
             tcls.append(c)  # class
