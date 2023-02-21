@@ -28,8 +28,10 @@ from PIL import ExifTags, Image, ImageOps
 from torch.utils.data import DataLoader, Dataset, dataloader, distributed
 from tqdm import tqdm
 
-from utils.augmentations import (Albumentations, augment_hsv, classify_albumentations, classify_transforms, copy_paste,
-                                 letterbox, mixup, random_perspective)
+# from utils.augmentations import (Albumentations, augment_hsv, classify_albumentations, classify_transforms, copy_paste,
+#                                  letterbox, mixup, random_perspective)
+from utils.augmentations_obb import (Albumentations, augment_hsv, classify_albumentations, classify_transforms,
+                                     copy_paste, letterbox, mixup, random_perspective)
 from utils.general import (DATASETS_DIR, LOGGER, NUM_THREADS, TQDM_BAR_FORMAT, check_dataset, check_requirements,
                            check_yaml, clean_str, cv2, is_colab, is_kaggle, segments2boxes, unzip_file, xyn2xy,
                            xywh2xyxy, xywhn2xyxy, xyxy2xywhn)
@@ -44,6 +46,7 @@ RANK = int(os.getenv('RANK', -1))
 PIN_MEMORY = str(os.getenv('PIN_MEMORY', True)).lower() == 'true'  # global pin_memory for dataloaders
 
 # Get orientation exif tag
+# Exchangeable image file format
 for orientation in ExifTags.TAGS.keys():
     if ExifTags.TAGS[orientation] == 'Orientation':
         break
@@ -58,11 +61,13 @@ def get_hash(paths):
 
 
 def exif_size(img):
-    # Returns exif-corrected PIL size
+    # Returns exif-corrected PIL size,
+    # when the orientation is 270 or 90, it will replace width and height with each other
     s = img.size  # (width, height)
     with contextlib.suppress(Exception):
         rotation = dict(img._getexif().items())[orientation]
         if rotation in [6, 8]:  # rotation 270 or 90
+            # change the width and height
             s = (s[1], s[0])
     return s
 
@@ -117,6 +122,27 @@ def create_dataloader(path,
                       prefix='',
                       shuffle=False,
                       seed=0):
+    """
+    First step: load image dataset; Second step: load dataloader
+    :param path:
+    :param imgsz:
+    :param batch_size:
+    :param stride:
+    :param single_cls:
+    :param hyp:
+    :param augment:
+    :param cache:
+    :param pad:
+    :param rect:
+    :param rank:
+    :param workers:
+    :param image_weights:
+    :param quad:
+    :param prefix:
+    :param shuffle:
+    :param seed:
+    :return:
+    """
     if rect and shuffle:
         LOGGER.warning('WARNING ⚠️ --rect is incompatible with DataLoader shuffle, setting shuffle=False')
         shuffle = False
@@ -461,6 +487,7 @@ class LoadImagesAndLabels(Dataset):
         self.path = path
         self.albumentations = Albumentations(size=img_size) if augment else None
 
+        # get image files list self.im_files and label files self.label_files
         try:
             f = []  # image files
             for p in path if isinstance(path, list) else [path]:
@@ -471,6 +498,7 @@ class LoadImagesAndLabels(Dataset):
                 elif p.is_file():  # file
                     with open(p) as t:
                         t = t.read().strip().splitlines()
+                        # os.sep just a separate '/'
                         parent = str(p.parent) + os.sep
                         f += [x.replace('./', parent, 1) if x.startswith('./') else x for x in t]  # to global path
                         # f += [p.parent / x.lstrip(os.sep) for x in t]  # to global path (pathlib)
@@ -482,6 +510,8 @@ class LoadImagesAndLabels(Dataset):
         except Exception as e:
             raise Exception(f'{prefix}Error loading data from {path}: {e}\n{HELP_URL}') from e
 
+        # ================================= check cache, display cache, read cache
+        # self.labels, self.shapes, updated self.im_files, updated self.label_files
         # Check cache
         self.label_files = img2label_paths(self.im_files)  # labels
         cache_path = (p if p.is_file() else Path(self.label_files[0]).parent).with_suffix('.cache')
@@ -490,6 +520,7 @@ class LoadImagesAndLabels(Dataset):
             assert cache['version'] == self.cache_version  # matches current version
             assert cache['hash'] == get_hash(self.label_files + self.im_files)  # identical hash
         except Exception:
+            # if the dataset cache files don't exit, it will cache_labels()
             cache, exists = self.cache_labels(cache_path, prefix), False  # run cache ops
 
         # Display cache
@@ -503,6 +534,7 @@ class LoadImagesAndLabels(Dataset):
 
         # Read cache
         [cache.pop(k) for k in ('hash', 'version', 'msgs')]  # remove items
+        # labels: bounding boxes; shapes: image size; self.segments: in generally, it is empty
         labels, shapes, self.segments = zip(*cache.values())
         nl = len(np.concatenate(labels, 0))  # number of labels
         assert nl > 0 or not augment, f'{prefix}All labels empty in {cache_path}, can not start training. {HELP_URL}'
@@ -511,8 +543,8 @@ class LoadImagesAndLabels(Dataset):
         self.im_files = list(cache.keys())  # update
         self.label_files = img2label_paths(cache.keys())  # update
 
-        # Filter images
-        if min_items:
+        # Filter images when it's bounding boxes number is smaller than min_items
+        if min_items:  # default value min_items = 0
             include = np.array([len(x) >= min_items for x in self.labels]).nonzero()[0].astype(int)
             LOGGER.info(f'{prefix}{n - len(include)}/{n} images filtered from dataset')
             self.im_files = [self.im_files[i] for i in include]
@@ -526,8 +558,8 @@ class LoadImagesAndLabels(Dataset):
         bi = np.floor(np.arange(n) / batch_size).astype(int)  # batch index
         nb = bi[-1] + 1  # number of batches
         self.batch = bi  # batch index of image
-        self.n = n
-        self.indices = range(n)
+        self.n = n  # number of images
+        self.indices = range(n)  # images or labels index
 
         # Update labels
         include_class = []  # filter labels to include only these classes (optional)
@@ -566,23 +598,29 @@ class LoadImagesAndLabels(Dataset):
 
             self.batch_shapes = np.ceil(np.array(shapes) * img_size / stride + pad).astype(int) * stride
 
-        # Cache images into RAM/disk for faster training
+        # =========================================== Cache images into RAM/disk for faster training
+        # self.ims, self.im_files, self.npy_files
+        # self.check_cache_ram() return to cache or not to cache
         if cache_images == 'ram' and not self.check_cache_ram(prefix=prefix):
             cache_images = False
         self.ims = [None] * n
+        # npy files for image files
         self.npy_files = [Path(f).with_suffix('.npy') for f in self.im_files]
         if cache_images:
+            # for disk, cache_images_to_disk, save each image to npy file
+            # for ram, load_image, Loads 1 image from dataset index 'i', returns (im, original hw, resized hw)
             b, gb = 0, 1 << 30  # bytes of cached images, bytes per gigabytes
-            self.im_hw0, self.im_hw = [None] * n, [None] * n
+            self.im_hw0, self.im_hw = [None] * n, [None] * n  # original image size, resized image size
             fcn = self.cache_images_to_disk if cache_images == 'disk' else self.load_image
             results = ThreadPool(NUM_THREADS).imap(fcn, range(n))
             pbar = tqdm(enumerate(results), total=n, bar_format=TQDM_BAR_FORMAT, disable=LOCAL_RANK > 0)
             for i, x in pbar:
                 if cache_images == 'disk':
-                    b += self.npy_files[i].stat().st_size
+                    # if cache to disk, it will save to npy files
+                    b += self.npy_files[i].stat().st_size  # bytes of the saved npy file
                 else:  # 'ram'
                     self.ims[i], self.im_hw0[i], self.im_hw[i] = x  # im, hw_orig, hw_resized = load_image(self, i)
-                    b += self.ims[i].nbytes
+                    b += self.ims[i].nbytes  # bytes of the image
                 pbar.desc = f'{prefix}Caching images ({b / gb:.1f}GB {cache_images})'
             pbar.close()
 
@@ -604,6 +642,7 @@ class LoadImagesAndLabels(Dataset):
         return cache
 
     def cache_labels(self, path=Path('./labels.cache'), prefix=''):
+        # image files: [ground_truth, image_size, segmentation], hash: , results, msgs, version
         # Cache dataset labels, check images and read shapes
         x = {}  # dict
         nm, nf, ne, nc, msgs = 0, 0, 0, 0, []  # number missing, found, empty, corrupt, messages
@@ -651,6 +690,15 @@ class LoadImagesAndLabels(Dataset):
     #     return self
 
     def __getitem__(self, index):
+        """
+        Augment the [clsid x1y1 x2y2 x3y3 x4y4] labels and trans label format to rotated box.
+        Returns:
+            img (tensor): (3, height, width), RGB
+            labels_out (tensor): (n, [None clsid cx cy long-side short-side gaussian_θ_labels]) θ∈[-pi/2, pi/2)
+            img_file (str): img_dir
+            shapes : None or [(h_raw, w_raw), (hw_ratios, wh_paddings)], for COCO mAP rescaling
+        """
+        # self.indices = range(n)  # images or labels index
         index = self.indices[index]  # linear, shuffled, or image_weights
 
         hyp = self.hyp
@@ -666,17 +714,24 @@ class LoadImagesAndLabels(Dataset):
 
         else:
             # Load image
+            # img data, original image size, resized image size
             img, (h0, w0), (h, w) = self.load_image(index)
 
             # Letterbox
             shape = self.batch_shapes[self.batch[index]] if self.rect else self.img_size  # final letterboxed shape
+            # ratio [w_ratio, h_ratio] pad [w_pad, h_pad]
             img, ratio, pad = letterbox(img, shape, auto=False, scaleup=self.augment)
             shapes = (h0, w0), ((h / h0, w / w0), pad)  # for COCO mAP rescaling
 
-            labels = self.labels[index].copy()
-            if labels.size:  # normalized xywh to pixel xyxy format
-                labels[:, 1:] = xywhn2xyxy(labels[:, 1:], ratio[0] * w, ratio[1] * h, padw=pad[0], padh=pad[1])
+            labels = self.labels[index].copy()  # (cls, x1, y1, x2, y2, x3, y3, x4, y4)
+            if labels.size:  # normalized (x1, y1, x2, y2, x3, y3, x4, y4) to pixel xyxy format
+                # labels[:, 1:] = xywhn2xyxy(labels[:, 1:], ratio[0] * w, ratio[1] * h, padw=pad[0], padh=pad[1])
+                labels[:, [1, 3, 5, 7]] = labels[:, [1, 3, 5, 7]] * ratio[0] + pad[0]
+                labels[:, [2, 4, 6, 8]] = labels[:, [2, 4, 6, 8]] * ratio[1] + pad[1]
 
+
+            # labels format (cls, x1, y1, x2, y2, x3, y3, x4, y4)
+            # with this label format, the random_perspective will be easier than (x, y, w, h)
             if self.augment:
                 img, labels = random_perspective(img,
                                                  labels,
@@ -687,28 +742,31 @@ class LoadImagesAndLabels(Dataset):
                                                  perspective=hyp['perspective'])
 
         nl = len(labels)  # number of labels
-        if nl:
-            labels[:, 1:5] = xyxy2xywhn(labels[:, 1:5], w=img.shape[1], h=img.shape[0], clip=True, eps=1E-3)
+        # if nl:
+        #     labels[:, 1:5] = xyxy2xywhn(labels[:, 1:5], w=img.shape[1], h=img.shape[0], clip=True, eps=1E-3)
 
         if self.augment:
-            # Albumentations
-            img, labels = self.albumentations(img, labels)
-            nl = len(labels)  # update after albumentations
+            # Don't need Albumentations
+            # img, labels = self.albumentations(img, labels)
+            # nl = len(labels)  # update after albumentations
 
             # HSV color-space
             augment_hsv(img, hgain=hyp['hsv_h'], sgain=hyp['hsv_s'], vgain=hyp['hsv_v'])
 
             # Flip up-down
+            img_h, img_w = img.shape[0], img.shape[1]
             if random.random() < hyp['flipud']:
                 img = np.flipud(img)
                 if nl:
-                    labels[:, 2] = 1 - labels[:, 2]
+                    # labels[:, 2] = 1 - labels[:, 2]  # the label is normalized
+                    labels[:, [2, 4, 6, 8]] = img_h - 1 - labels[:, [2, 4, 6, 8]]
 
             # Flip left-right
             if random.random() < hyp['fliplr']:
                 img = np.fliplr(img)
                 if nl:
-                    labels[:, 1] = 1 - labels[:, 1]
+                    # labels[:, 1] = 1 - labels[:, 1]
+                    labels[:, [1, 3, 5, 7]] = img_w - 1 - labels[:, [1, 3, 5, 7]]
 
             # Cutouts
             # labels = cutout(img, labels, p=0.5)
@@ -726,6 +784,8 @@ class LoadImagesAndLabels(Dataset):
 
     def load_image(self, i):
         # Loads 1 image from dataset index 'i', returns (im, original hw, resized hw)
+        # if already cached in RAM, it will directly return;
+        # otherwise, it will load npy file or image file, and then return;
         im, f, fn = self.ims[i], self.im_files[i], self.npy_files[i],
         if im is None:  # not cached in RAM
             if fn.exists():  # load npy
@@ -988,6 +1048,12 @@ def autosplit(path=DATASETS_DIR / 'coco128/images', weights=(0.9, 0.1, 0.0), ann
 
 
 def verify_image_label(args):
+    """
+    Verify one image data;
+    Verify the corresponding label text data of the image;
+    :param args:
+    :return: im_file, lb, shape, segments, nm, nf, ne, nc, msg
+    """
     # Verify one image-label pair
     im_file, lb_file, prefix = args
     nm, nf, ne, nc, msg, segments = 0, 0, 0, 0, '', []  # number (missing, found, empty, corrupt), message, segments
@@ -1001,6 +1067,7 @@ def verify_image_label(args):
         if im.format.lower() in ('jpg', 'jpeg'):
             with open(im_file, 'rb') as f:
                 f.seek(-2, 2)
+                # determine the end byte exist
                 if f.read() != b'\xff\xd9':  # corrupt JPEG
                     ImageOps.exif_transpose(Image.open(im_file)).save(im_file, 'JPEG', subsampling=0, quality=100)
                     msg = f'{prefix}WARNING ⚠️ {im_file}: corrupt JPEG restored and saved'
@@ -1010,16 +1077,20 @@ def verify_image_label(args):
             nf = 1  # label found
             with open(lb_file) as f:
                 lb = [x.split() for x in f.read().strip().splitlines() if len(x)]
-                if any(len(x) > 6 for x in lb):  # is segment
+                # if label format (class, x1, y1, x2, y2, x3, y3, x4, y4), len(x) will be 9
+                if any(len(x) > 9 for x in lb):  # is segment
                     classes = np.array([x[0] for x in lb], dtype=np.float32)
                     segments = [np.array(x[1:], dtype=np.float32).reshape(-1, 2) for x in lb]  # (cls, xy1...)
                     lb = np.concatenate((classes.reshape(-1, 1), segments2boxes(segments)), 1)  # (cls, xywh)
                 lb = np.array(lb, dtype=np.float32)
-            nl = len(lb)
+            nl = len(lb)  # len(array) will return the 0 dim size
             if nl:
-                assert lb.shape[1] == 5, f'labels require 5 columns, {lb.shape[1]} columns detected'
+                # lb[nl, (class, x1, y1,  x2, y2, x3, y3, x4, y4)]
+                assert lb.shape[1] == 9, f'labels require 9 columns, {lb.shape[1]} columns detected'
                 assert (lb >= 0).all(), f'negative label values {lb[lb < 0]}'
-                assert (lb[:, 1:] <= 1).all(), f'non-normalized or out of bounds coordinates {lb[:, 1:][lb[:, 1:] > 1]}'
+                # x, y, w, h should be normalized by image size
+                # assert (lb[:,
+                #         1:5] <= 1).all(), f'non-normalized or out of bounds coordinates {lb[:, 1:][lb[:, 1:] > 1]}'
                 _, i = np.unique(lb, axis=0, return_index=True)
                 if len(i) < nl:  # duplicate row check
                     lb = lb[i]  # remove duplicates
@@ -1028,10 +1099,10 @@ def verify_image_label(args):
                     msg = f'{prefix}WARNING ⚠️ {im_file}: {nl - len(i)} duplicate labels removed'
             else:
                 ne = 1  # label empty
-                lb = np.zeros((0, 5), dtype=np.float32)
+                lb = np.zeros((0, 9), dtype=np.float32)
         else:
             nm = 1  # label missing
-            lb = np.zeros((0, 5), dtype=np.float32)
+            lb = np.zeros((0, 9), dtype=np.float32)
         return im_file, lb, shape, segments, nm, nf, ne, nc, msg
     except Exception as e:
         nc = 1

@@ -14,6 +14,7 @@ import torchvision.transforms.functional as TF
 
 from utils.general import LOGGER, check_version, colorstr, resample_segments, segment2box, xywhn2xyxy
 from utils.metrics import bbox_ioa
+from utils.obb_utils import poly_filter
 
 IMAGENET_MEAN = 0.485, 0.456, 0.406  # RGB mean
 IMAGENET_STD = 0.229, 0.224, 0.225  # RGB standard deviation
@@ -151,8 +152,21 @@ def random_perspective(im,
                        shear=10,
                        perspective=0.0,
                        border=(0, 0)):
+    """
+    :param im:
+    :param targets: obb [cls xyxyxyxy]
+    :param segments:
+    :param degrees: rotation degree [0, 180)
+    :param translate: ratio value
+    :param scale: ratio
+    :param shear:
+    :param perspective:
+    :param border:
+    :return: im, targets: obb [cls, xyxyxyxy]
+    """
     # torchvision.transforms.RandomAffine(degrees=(-10, 10), translate=(0.1, 0.1), scale=(0.9, 1.1), shear=(-10, 10))
-    # targets = [cls, xyxy]
+    # targets = [cls, xyxy] for horizontal bounding boxes
+    # targets = [cls, xyxyxyxy] for oriented bounding boxes
 
     height = im.shape[0] + border[0] * 2  # shape(h,w,c)
     width = im.shape[1] + border[1] * 2
@@ -202,6 +216,7 @@ def random_perspective(im,
     # Transform label coordinates
     n = len(targets)
     if n:
+        # this part for segmentation task
         use_segments = any(x.any() for x in segments) and len(segments) == n
         new = np.zeros((n, 4))
         if use_segments:  # warp segments
@@ -216,24 +231,34 @@ def random_perspective(im,
                 new[i] = segment2box(xy, width, height)
 
         else:  # warp boxes
-            xy = np.ones((n * 4, 3))
-            xy[:, :2] = targets[:, [1, 2, 3, 4, 1, 4, 3, 2]].reshape(n * 4, 2)  # x1y1, x2y2, x1y2, x2y1
+            xy = np.ones((n * 4, 3))  # for the 3 (x, y, 1)
+            # xy[:, :2] = targets[:, [1, 2, 3, 4, 1, 4, 3, 2]].reshape(n * 4, 2)  # x1y1, x2y2, x1y2, x2y1
+            xy[:, :2] = targets[:, 1:].reshape(n * 4, 2)  # x1y1, x2y2, x1y2, x2y1
             xy = xy @ M.T  # transform
             xy = (xy[:, :2] / xy[:, 2:3] if perspective else xy[:, :2]).reshape(n, 8)  # perspective rescale or affine
 
-            # create new boxes
-            x = xy[:, [0, 2, 4, 6]]
-            y = xy[:, [1, 3, 5, 7]]
-            new = np.concatenate((x.min(1), y.min(1), x.max(1), y.max(1))).reshape(4, n).T
-
-            # clip
-            new[:, [0, 2]] = new[:, [0, 2]].clip(0, width)
-            new[:, [1, 3]] = new[:, [1, 3]].clip(0, height)
+            # as for obb, we don't need the smallest rectangles and clip the obb out of image definition
+            # # create new boxes
+            # # when random_perspective, the hbb will become irregular box,
+            # # get the smallest outer bounding boxes by [x.min(1), y.min(1), x.max(1), y.max(1)]
+            # x = xy[:, [0, 2, 4, 6]]  # x1, x2, x1, x2
+            # y = xy[:, [1, 3, 5, 7]]  # y1, y2, y2, y1
+            # new = np.concatenate((x.min(1), y.min(1), x.max(1), y.max(1))).reshape(4, n).T
+            #
+            # # clip
+            # new[:, [0, 2]] = new[:, [0, 2]].clip(0, width)
+            # new[:, [1, 3]] = new[:, [1, 3]].clip(0, height)
 
         # filter candidates
-        i = box_candidates(box1=targets[:, 1:5].T * s, box2=new.T, area_thr=0.01 if use_segments else 0.10)
-        targets = targets[i]
-        targets[:, 1:5] = new[i]
+        # box_candidates will get the width and height of new bounding boxes and the area ratio of new/old,
+        # then select width>wh_thr, height>wh_thr, new_area/old_ares> area_thr
+        # i = box_candidates(box1=targets[:, 1:5].T * s, box2=new.T, area_thr=0.01 if use_segments else 0.10)
+        # targets = targets[i]
+        # targets[:, 1:5] = new[i]
+        # filter oriented bounding boxes by their center
+        xy_keep = poly_filter(xy, h=height, w=width)
+        targets[:, 1:] = xy
+        targets = targets[xy_keep]
 
     return im, targets
 
@@ -396,3 +421,5 @@ class ToTensor:
         im = im.half() if self.half else im.float()  # uint8 to fp16/32
         im /= 255.0  # 0-255 to 0.0-1.0
         return im
+
+

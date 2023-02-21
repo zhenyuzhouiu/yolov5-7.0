@@ -164,7 +164,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
     gs = max(int(model.stride.max()), 32)  # grid size (max stride)
     imgsz = check_img_size(opt.imgsz, gs, floor=gs * 2)  # verify imgsz is gs-multiple
 
-    # Batch size
+    # Batch size for automatically deciding by batch_size == -1
     if RANK == -1 and batch_size == -1:  # single-GPU only, estimate best batch size
         batch_size = check_train_batch_size(model, imgsz, amp)
         loggers.on_params_update({"batch_size": batch_size})
@@ -261,6 +261,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
     hyp['box'] *= 3 / nl  # scale to layers
     hyp['cls'] *= nc / 80 * 3 / nl  # scale to classes and layers
     hyp['obj'] *= (imgsz / 640) ** 2 * 3 / nl  # scale to image size and layers
+    hyp['angle'] *= 3 / nl  # scale to layers
     hyp['label_smoothing'] = opt.label_smoothing
     model.nc = nc  # attach number of classes to model
     model.hyp = hyp  # attach hyperparameter to model
@@ -275,7 +276,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
     # nw = min(nw, (epochs - start_epoch) / 2 * nb)  # limit warmup to < 1/2 of training
     last_opt_step = -1
     maps = np.zeros(nc)  # mAP per class
-    results = (0, 0, 0, 0, 0, 0, 0)  # P, R, mAP@.5, mAP@.5-.95, val_loss(box, obj, cls)
+    results = (0, 0, 0, 0, 0, 0, 0, 0)  # P, R, mAP@.5, mAP@.5-.95, val_loss(box, obj, cls, angle)
     scheduler.last_epoch = start_epoch - 1  # do not move
     # GradScaler can scale loss for avoiding overflow when use half flot
     # only during pass the gradient information
@@ -301,11 +302,13 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
         # b = int(random.uniform(0.25 * imgsz, 0.75 * imgsz + gs) // gs * gs)
         # dataset.mosaic_border = [b - imgsz, -b]  # height, width borders
 
-        mloss = torch.zeros(3, device=device)  # mean losses
+        # mloss = torch.zeros(3, device=device)  # mean losses
+        mloss = torch.zeros(4, device=device)  # mean loss for (box, obj, cls, angle)
         if RANK != -1:
             train_loader.sampler.set_epoch(epoch)
         pbar = enumerate(train_loader)
-        LOGGER.info(('\n' + '%11s' * 7) % ('Epoch', 'GPU_mem', 'box_loss', 'obj_loss', 'cls_loss', 'Instances', 'Size'))
+        LOGGER.info(('\n' + '%11s' * 7) % ('Epoch', 'GPU_mem', 'box_loss', 'obj_loss', 'cls_loss', 'angle_loss',
+                                           'Instances', 'Size'))
         if RANK in {-1, 0}:
             pbar = tqdm(pbar, total=nb, bar_format=TQDM_BAR_FORMAT)  # progress bar
         optimizer.zero_grad()
@@ -491,6 +494,12 @@ def parse_opt(known=False):
     parser.add_argument('--batch-size', type=int, default=16, help='total batch size for all GPUs, -1 for autobatch')
     parser.add_argument('--imgsz', '--img', '--img-size', type=int, default=640, help='train, val image size (pixels)')
     # store_true is ture when the action is triggered and false if it is not
+    # Rectangular training attempts to sort all of your training images by aspect ratio,
+    # and then groups similar aspect ratio images into a single batch.
+    # It will then pad all the images in the batch as necessary to achieve a minimum pad given the constraint
+    # that the image dimensions must be multiples of 32.
+    # One important problem with rectangular training is that
+    # you need to be sure that the images are not shuffled by the data loader.
     parser.add_argument('--rect', action='store_true', help='rectangular training')
     parser.add_argument('--resume', nargs='?', const=True, default=False, help='resume most recent training')
     parser.add_argument('--nosave', action='store_true', help='only save final checkpoint')
@@ -500,9 +509,14 @@ def parse_opt(known=False):
     parser.add_argument('--evolve', type=int, nargs='?', const=300, help='evolve hyperparameters for x generations')
     parser.add_argument('--bucket', type=str, default='', help='gsutil bucket')
     parser.add_argument('--cache', type=str, nargs='?', const='ram', help='image --cache ram/disk')
+    # samples images from the training set weighted by their inverse mAP from the previous epoch's testing
+    # (rather than sampling the images uniformly as in normal training).
+    # This will result in images with a high content of low-mAP objects being selected with higher likelihood
+    # during training.
     parser.add_argument('--image-weights', action='store_true', help='use weighted image selection for training')
     parser.add_argument('--device', default='1', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
     parser.add_argument('--multi-scale', action='store_true', help='vary img-size +/- 50%%')
+    # single-class training, merge all classes into 0
     parser.add_argument('--single-cls', action='store_true', help='train multi-class data as single-class')
     parser.add_argument('--optimizer', type=str, choices=['SGD', 'Adam', 'AdamW'], default='SGD', help='optimizer')
     parser.add_argument('--sync-bn', action='store_true', help='use SyncBatchNorm, only available in DDP mode')
@@ -577,7 +591,7 @@ def main(opt, callbacks=Callbacks()):
         dist.init_process_group(backend="nccl" if dist.is_nccl_available() else "gloo")
 
     # Train
-    if not opt.evolve:
+    if not opt.evolve:  # if not evolve hyperparameter, directly train the model
         train(opt.hyp, opt, device, callbacks)
 
     # Evolve hyperparameters (optional)
@@ -664,7 +678,7 @@ def main(opt, callbacks=Callbacks()):
             callbacks = Callbacks()
             # Write mutation results
             keys = ('metrics/precision', 'metrics/recall', 'metrics/mAP_0.5', 'metrics/mAP_0.5:0.95', 'val/box_loss',
-                    'val/obj_loss', 'val/cls_loss')
+                    'val/obj_loss', 'val/cls_loss', 'val/angle_loss')
             print_mutation(keys, results, hyp.copy(), save_dir, opt.bucket)
 
         # Plot results
