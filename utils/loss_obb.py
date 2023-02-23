@@ -121,6 +121,7 @@ class ComputeLoss:
             BCEcls, BCEobj, BCEangle = FocalLoss(BCEcls, g), FocalLoss(BCEobj, g), FocalLoss(BCEangle, g)
 
         m = de_parallel(model).model[-1]  # Detect() module
+        self.stride = m.stride  # tensor([8, 16, 32,...])
         # dictionary.get(keyname, value) if the key doesn't exit, it will return the value
         self.balance = {3: [4.0, 1.0, 0.4]}.get(m.nl, [4.0, 1.0, 0.25, 0.06, 0.02])  # P3-P7 balance different head loss
         self.ssi = list(m.stride).index(16) if autobalance else 0  # stride 16 index
@@ -151,6 +152,7 @@ class ComputeLoss:
             b, a, gj, gi = indices[i]  # image, anchor_index, gridy, gridx
             # pi.shape: [b, 3, imgsz/stride, imgsz/stride, 5+nc]
             # tobj initialized with 0 represents non-object
+            # torch.zeros_like(input=tensor)
             tobj = torch.zeros(pi.shape[:4], dtype=pi.dtype, device=self.device)  # target obj
 
             n = b.shape[0]  # number of objects
@@ -213,7 +215,8 @@ class ComputeLoss:
     def build_targets(self, p, targets):
         """
         :param p: list
-        :param targets: list targets(image,class,x,y,w,h, 180) with shape [nt, 186] x, y, w, h is ratio value, 180 is the gaussian angle
+        :param targets: list targets(image,class,x,y,l,s,180) with shape [nt, 186] x,y,l,s are not normalized,
+         180 is the CSL angle
         :return: indices.append((b, a, gj.clamp_(0, shape[2] - 1), gi.clamp_(0, shape[3] - 1)))  # image, anchor, grid
                  tbox.append(torch.cat((gxy - gij, gwh), 1))  gxy-gij is tx and ty gwh is absolute value
                  anch.append(anchors[a])  # anchors
@@ -226,11 +229,12 @@ class ComputeLoss:
         tcls, tbox, indices, anch = [], [], [], []
         # circular gaussian smooth angle
         tangle = []
+        feature_wh = torch.ones(2, device=targets.device)  # feature_wh
         # 187 represents (image, class, x, y, w, h, 180, anchor_index)
-        gain = torch.ones(187, device=self.device)  # normalized to gridspace gain
+        # gain = torch.ones(187, device=self.device)  # normalized to gridspace gain
         # ai.shape: (na, nt)
         ai = torch.arange(na, device=self.device).float().view(na, 1).repeat(1, nt)  # same as .repeat_interleave(nt)
-        # targets.shape: [na, nt, (image, class, x, y, w, h ,anchor)]
+        # targets.shape: [na, nt, (image, class, x, y, w, h, 180, anchor)]
         targets = torch.cat((targets.repeat(na, 1, 1), ai[..., None]), 2)  # append anchor indices
 
         # (-0.5, 1.5)
@@ -249,12 +253,15 @@ class ComputeLoss:
         for i in range(self.nl):
             # anchors and p are result lists from each head
             anchors, shape = self.anchors[i], p[i].shape  # p[i].shape: [bs, 3, imgsz/stride, imgsz/stride, 5+nc]
+            feature_wh[0:2] = torch.tensor(p[i].shape)[[3, 2]]  # xyxy gain=[w_f, h_f]
             # [3, 2, 3, 2] is the index for [imgsz/stride, imgsz/stride, imgsz/stride, imgsz/stride]
-            gain[2:6] = torch.tensor(shape)[[3, 2, 3, 2]]  # xyxy gain for affining to feature map
+            # gain[2:6] = torch.tensor(shape)[[3, 2, 3, 2]]  # xyxy gain for affining to feature map
 
             # Match targets to anchors
             # affine ground truth to feature map
-            t = targets * gain  # shape(3,n,7), then the origin of coordinates t is the left upper
+            # t = targets * gain  # shape(3,n,7), then the origin of coordinates t is the left upper
+            t = targets.clone()
+            t[:, :, 2:6] /= self.stride[i]  # scale the x, y, l, s to the grid size
             if nt:
                 # Matches by gtw/aw and gth/ah smaller than anchor_t
                 r = t[..., 4:6] / anchors[:, None]  # wh ratio
@@ -266,7 +273,8 @@ class ComputeLoss:
 
                 # Offsets https://blog.csdn.net/qq_37541097/article/details/123594351
                 gxy = t[:, 2:4]  # grid xy shape=[after_anchor_filter, 2]
-                gxi = gain[[2, 3]] - gxy  # inverse
+                # gxi = gain[[2, 3]] - gxy  # inverse
+                gxi = feature_wh[[0, 1]] - gxy
                 j, k = ((gxy % 1 < g) & (gxy > 1)).T
                 l, m = ((gxi % 1 < g) & (gxi > 1)).T  # to check the center point at the upper part or lower part
                 j = torch.stack((torch.ones_like(j), j, k, l, m))  # [5, after_anchor_filter]
@@ -287,7 +295,7 @@ class ComputeLoss:
             gi, gj = gij.T  # grid indices
 
             # Append
-            # b: image batch id, a: anchor id, gj: ground truth cell j incex, gi: ground truth cell i index
+            # b: image batch id, a: anchor id, gj: ground truth cell j index, gi: ground truth cell i index
             indices.append((b, a, gj.clamp_(0, shape[2] - 1), gi.clamp_(0, shape[3] - 1)))  # image, anchor, grid
             # gxy is relative to each grid cell, belong [0, 1]
             # gwh is the absolute length from t = targets * gain

@@ -36,6 +36,7 @@ from utils.general import (DATASETS_DIR, LOGGER, NUM_THREADS, TQDM_BAR_FORMAT, c
                            check_yaml, clean_str, cv2, is_colab, is_kaggle, segments2boxes, unzip_file, xyn2xy,
                            xywh2xyxy, xywhn2xyxy, xyxy2xywhn)
 from utils.torch_utils import torch_distributed_zero_first
+from utils.obb_utils import poly_filter, poly2obb
 
 # Parameters
 HELP_URL = 'See https://github.com/ultralytics/yolov5/wiki/Train-Custom-Data'
@@ -611,7 +612,8 @@ class LoadImagesAndLabels(Dataset):
             # for ram, load_image, Loads 1 image from dataset index 'i', returns (im, original hw, resized hw)
             b, gb = 0, 1 << 30  # bytes of cached images, bytes per gigabytes
             self.im_hw0, self.im_hw = [None] * n, [None] * n  # original image size, resized image size
-            fcn = self.cache_images_to_disk if cache_images == 'disk' else self.load_image
+            # fcn = self.cache_images_to_disk if cache_images == 'disk' else self.load_image
+            fcn = self.cache_images_to_disk if cache_images == 'disk' else self.load_image_label
             results = ThreadPool(NUM_THREADS).imap(fcn, range(n))
             pbar = tqdm(enumerate(results), total=n, bar_format=TQDM_BAR_FORMAT, disable=LOCAL_RANK > 0)
             for i, x in pbar:
@@ -619,7 +621,7 @@ class LoadImagesAndLabels(Dataset):
                     # if cache to disk, it will save to npy files
                     b += self.npy_files[i].stat().st_size  # bytes of the saved npy file
                 else:  # 'ram'
-                    self.ims[i], self.im_hw0[i], self.im_hw[i] = x  # im, hw_orig, hw_resized = load_image(self, i)
+                    self.ims[i], self.im_hw0[i], self.im_hw[i], self.labels[i] = x  # im, hw_orig, hw_resized, labels = load_image_label(self, i)
                     b += self.ims[i].nbytes  # bytes of the image
                 pbar.desc = f'{prefix}Caching images ({b / gb:.1f}GB {cache_images})'
             pbar.close()
@@ -696,7 +698,7 @@ class LoadImagesAndLabels(Dataset):
             img (tensor): (3, height, width), RGB
             labels_out (tensor): (n, [None clsid cx cy long-side short-side gaussian_θ_labels]) θ∈[-pi/2, pi/2)
             img_file (str): img_dir
-            shapes : None or [(h_raw, w_raw), (hw_ratios, wh_paddings)], for COCO mAP rescaling
+            shapes : None or [(h_raw, w_raw), ((h_ratios, w_ratios), wh_paddings)], for COCO mAP rescaling
         """
         # self.indices = range(n)  # images or labels index
         index = self.indices[index]  # linear, shuffled, or image_weights
@@ -715,7 +717,8 @@ class LoadImagesAndLabels(Dataset):
         else:
             # Load image
             # img data, original image size, resized image size
-            img, (h0, w0), (h, w) = self.load_image(index)
+            # img, (h0, w0), (h, w) = self.load_image(index)
+            img, (h0, w0), (h, w), img_label = self.load_image_label(index)
 
             # Letterbox
             shape = self.batch_shapes[self.batch[index]] if self.rect else self.img_size  # final letterboxed shape
@@ -723,12 +726,12 @@ class LoadImagesAndLabels(Dataset):
             img, ratio, pad = letterbox(img, shape, auto=False, scaleup=self.augment)
             shapes = (h0, w0), ((h / h0, w / w0), pad)  # for COCO mAP rescaling
 
-            labels = self.labels[index].copy()  # (cls, x1, y1, x2, y2, x3, y3, x4, y4)
+            # labels = self.labels[index].copy()
+            labels = img_label.copy()  # (cls, x1, y1, x2, y2, x3, y3, x4, y4)
             if labels.size:  # normalized (x1, y1, x2, y2, x3, y3, x4, y4) to pixel xyxy format
                 # labels[:, 1:] = xywhn2xyxy(labels[:, 1:], ratio[0] * w, ratio[1] * h, padw=pad[0], padh=pad[1])
                 labels[:, [1, 3, 5, 7]] = labels[:, [1, 3, 5, 7]] * ratio[0] + pad[0]
                 labels[:, [2, 4, 6, 8]] = labels[:, [2, 4, 6, 8]] * ratio[1] + pad[1]
-
 
             # labels format (cls, x1, y1, x2, y2, x3, y3, x4, y4)
             # with this label format, the random_perspective will be easier than (x, y, w, h)
@@ -753,7 +756,7 @@ class LoadImagesAndLabels(Dataset):
             # HSV color-space
             augment_hsv(img, hgain=hyp['hsv_h'], sgain=hyp['hsv_s'], vgain=hyp['hsv_v'])
 
-            # Flip up-down
+            # Flip up-down by changing y-axix
             img_h, img_w = img.shape[0], img.shape[1]
             if random.random() < hyp['flipud']:
                 img = np.flipud(img)
@@ -761,7 +764,7 @@ class LoadImagesAndLabels(Dataset):
                     # labels[:, 2] = 1 - labels[:, 2]  # the label is normalized
                     labels[:, [2, 4, 6, 8]] = img_h - 1 - labels[:, [2, 4, 6, 8]]
 
-            # Flip left-right
+            # Flip left-right by changing x-axis
             if random.random() < hyp['fliplr']:
                 img = np.fliplr(img)
                 if nl:
@@ -772,9 +775,29 @@ class LoadImagesAndLabels(Dataset):
             # labels = cutout(img, labels, p=0.5)
             # nl = len(labels)  # update after cutout
 
-        labels_out = torch.zeros((nl, 6))
+        # this part for horizontal bounding box
+        # labels_out = torch.zeros((nl, 6))
+        # if nl:
+        #     # labels [number_target, 5]
+        #     labels_out[:, 1:] = torch.from_numpy(labels)
         if nl:
-            labels_out[:, 1:] = torch.from_numpy(labels)
+            # *[clsid poly] to *[clsid cx cy l s angle csl_labels] angle∈[0, 180) non-normalized with image size
+            oboxes, csl_labels = poly2obb(polys=labels[:, 1:],
+                                          num_cls_angle=hyp['cls_angle'] if hyp else 180,
+                                          radius=hyp['csl_radius'] if hyp else 6.0,
+                                          use_gaussian=True)
+            labels_obb = np.concatenate((labels[:, :1], oboxes[:, 0:4], csl_labels),
+                                        axis=1)  # [cls, x, y, l, s, cls_label]
+            labels_mask = (oboxes[:, 0] >= 0) & (oboxes[:, 0] < img.shape[1]) \
+                          & (oboxes[:, 1] >= 0) & (oboxes[:, 1] < img.shape[0]) \
+                          & (oboxes[:, 2] > 5) | (oboxes[:, 3] > 5)
+            labels_obb = labels_obb[labels_mask]
+            nl = len(labels_obb)  # update after filter
+
+        c_num = 6 + hyp['cls_angle'] if hyp else 186  # [index_of_batch clsid cx cy l s gaussian_θ_labels]
+        labels_out = torch.zeros((nl, c_num))
+        if nl:
+            labels_out[:, 1:] = torch.from_numpy(labels_obb)
 
         # Convert
         img = img.transpose((2, 0, 1))[::-1]  # HWC to CHW, BGR to RGB
@@ -783,9 +806,13 @@ class LoadImagesAndLabels(Dataset):
         return torch.from_numpy(img), labels_out, self.im_files[index], shapes
 
     def load_image(self, i):
-        # Loads 1 image from dataset index 'i', returns (im, original hw, resized hw)
-        # if already cached in RAM, it will directly return;
-        # otherwise, it will load npy file or image file, and then return;
+        """
+        Loads 1 image from dataset index 'i', returns (im, original hw, resized hw)
+        if already cached in RAM, it will directly return;
+        otherwise, it will load npy file or image file, and then return;
+        :param i: index
+        :return:
+        """
         im, f, fn = self.ims[i], self.im_files[i], self.npy_files[i],
         if im is None:  # not cached in RAM
             if fn.exists():  # load npy
@@ -801,6 +828,31 @@ class LoadImagesAndLabels(Dataset):
             return im, (h0, w0), im.shape[:2]  # im, hw_original, hw_resized
         return self.ims[i], self.im_hw0[i], self.im_hw[i]  # im, hw_original, hw_resized
 
+    def load_image_label(self, i):
+        """
+        Loads 1 image from dataset index 'i', returns (im, original hw, resized hw, label)
+        if already cached in RAM, it will directly return;
+        otherwise, it will load npy file or image file, and then return;
+        Meanwhile, it will also scale the label by the scale factor
+        :param i: index
+        :return:
+        """
+        im, f, fn, label = self.ims[i], self.im_files[i], self.npy_files[i], self.labels[i].copy()
+        if im is None:  # not cached in RAM
+            if fn.exists():  # load npy
+                im = np.load(fn)
+            else:  # read image
+                im = cv2.imread(f)  # BGR
+                assert im is not None, f'Image Not Found {f}'
+            h0, w0 = im.shape[:2]  # orig hw
+            r = self.img_size / max(h0, w0)  # ratio
+            if r != 1:  # if sizes are not equal
+                interp = cv2.INTER_LINEAR if (self.augment or r > 1) else cv2.INTER_AREA
+                im = cv2.resize(im, (math.ceil(w0 * r), math.ceil(h0 * r)), interpolation=interp)
+                label[:, 1:] *= r
+            return im, (h0, w0), im.shape[:2], label  # im, hw_original, hw_resized, scaled_label
+        return self.ims[i], self.im_hw0[i], self.im_hw[i], self.labels[i]  # im, hw_original, hw_resized, label
+
     def cache_images_to_disk(self, i):
         # Saves an image as an *.npy file for faster loading
         f = self.npy_files[i]
@@ -808,17 +860,28 @@ class LoadImagesAndLabels(Dataset):
             np.save(f.as_posix(), cv2.imread(self.im_files[i]))
 
     def load_mosaic(self, index):
+        """
+
+        :param index:
+        :return: img4.shape: [self.img_size*2, self.img_size*2, 3], labels4
+        """
         # YOLOv5 4-mosaic loader. Loads 1 image + 3 random images into a 4-image mosaic
         labels4, segments4 = [], []
         s = self.img_size
+        # random.uniform(a,b) Get a random number in the range [a, b) or [a, b] depending on rounding
+        # self.mosaic_border [-img_size//2, -img_size//2]
+        # [img_size//2, 2*img_size+img_size//2]
         yc, xc = (int(random.uniform(-x, 2 * s + x)) for x in self.mosaic_border)  # mosaic center x, y
         indices = [index] + random.choices(self.indices, k=3)  # 3 additional image indices
         random.shuffle(indices)
         for i, index in enumerate(indices):
             # Load image
-            img, _, (h, w) = self.load_image(index)
+            # img, _, (h, w) = self.load_image(index)  # img, hw0, hw_scale # this can not scale label
+            img, _, (h, w), img_label = self.load_image_label(index)
 
             # place img in img4
+            # x1a, y1a, x2a, y2a is the range of img4
+            # x1b, y1b, x2b, y2b is the range of img
             if i == 0:  # top left
                 img4 = np.full((s * 2, s * 2, img.shape[2]), 114, dtype=np.uint8)  # base image with 4 tiles
                 x1a, y1a, x2a, y2a = max(xc - w, 0), max(yc - h, 0), xc, yc  # xmin, ymin, xmax, ymax (large image)
@@ -838,21 +901,32 @@ class LoadImagesAndLabels(Dataset):
             padh = y1a - y1b
 
             # Labels
-            labels, segments = self.labels[index].copy(), self.segments[index].copy()
+            # labels (num_gt, cls, x1, y1, x2, y2, x3, y3, x4, y4)
+            # labels, segments = self.labels[index].copy(), self.segments[index].copy()
+            labels, segments = img_label.copy(), self.segments[index].copy()
             if labels.size:
-                labels[:, 1:] = xywhn2xyxy(labels[:, 1:], w, h, padw, padh)  # normalized xywh to pixel xyxy format
+                # labels[:, 1:] = xywhn2xyxy(labels[:, 1:], w, h, padw, padh)  # normalized xywh to pixel xyxy format
+                labels[:, [1, 3, 5, 7]] = labels[:, [1, 3, 5, 7]] + padw
+                labels[:, [2, 4, 6, 8]] = labels[:, [2, 4, 6, 8]] + padh
                 segments = [xyn2xy(x, w, h, padw, padh) for x in segments]
             labels4.append(labels)
             segments4.extend(segments)
 
         # Concat/clip labels
         labels4 = np.concatenate(labels4, 0)
-        for x in (labels4[:, 1:], *segments4):
-            np.clip(x, 0, 2 * s, out=x)  # clip when using random_perspective()
+        # for x in (labels4[:, 1:], *segments4):
+        #     np.clip(x, 0, 2 * s, out=x)  # clip when using random_perspective()
+        for x in (segments4):
+            np.clip(x, 0, 2*s, out=x)
+        h_filter = 2*s
+        w_filter = 2*s
+        labels_mask = poly_filter(polys=labels4[:, 1:], h=h_filter, w=w_filter)
+        labels4 = labels4[labels_mask]
+
         # img4, labels4 = replicate(img4, labels4)  # replicate
 
         # Augment
-        img4, labels4, segments4 = copy_paste(img4, labels4, segments4, p=self.hyp['copy_paste'])
+        img4, labels4, segments4 = copy_paste(img4, labels4, segments4, p=self.hyp['copy_paste'])  # need segmentation label
         img4, labels4 = random_perspective(img4,
                                            labels4,
                                            segments4,
@@ -874,7 +948,8 @@ class LoadImagesAndLabels(Dataset):
         hp, wp = -1, -1  # height, width previous
         for i, index in enumerate(indices):
             # Load image
-            img, _, (h, w) = self.load_image(index)
+            # img, _, (h, w) = self.load_image(index)
+            img, _, (h, w), img_label = self.load_image_label(index)
 
             # place img in img9
             if i == 0:  # center
@@ -902,10 +977,15 @@ class LoadImagesAndLabels(Dataset):
             x1, y1, x2, y2 = (max(x, 0) for x in c)  # allocate coords
 
             # Labels
-            labels, segments = self.labels[index].copy(), self.segments[index].copy()
+            # labels, segments = self.labels[index].copy(), self.segments[index].copy()
+            labels, segments = img_label.copy(), self.segments[index].copy()
             if labels.size:
-                labels[:, 1:] = xywhn2xyxy(labels[:, 1:], w, h, padx, pady)  # normalized xywh to pixel xyxy format
+                # labels[:, 1:] = xywhn2xyxy(labels[:, 1:], w, h, padx, pady)  # normalized xywh to pixel xyxy format
                 segments = [xyn2xy(x, w, h, padx, pady) for x in segments]
+                labels_ = labels.clone() if isinstance(labels, torch.Tensor) else np.copy(labels)
+                labels_[:, [1, 3, 5, 7]] = labels[:, [1, 3, 5, 7]] + padx
+                labels_[:, [2, 4, 6, 8]] = labels[:, [2, 4, 6, 8]] + pady
+                labels = labels_
             labels9.append(labels)
             segments9.extend(segments)
 
@@ -919,14 +999,22 @@ class LoadImagesAndLabels(Dataset):
 
         # Concat/clip labels
         labels9 = np.concatenate(labels9, 0)
-        labels9[:, [1, 3]] -= xc
-        labels9[:, [2, 4]] -= yc
+        # labels9[:, [1, 3]] -= xc
+        # labels9[:, [2, 4]] -= yc
+        labels9[:, [1, 3, 5, 7]] -= xc
+        labels9[:, [2, 4, 6, 8]] -= yc
         c = np.array([xc, yc])  # centers
         segments9 = [x - c for x in segments9]
 
-        for x in (labels9[:, 1:], *segments9):
-            np.clip(x, 0, 2 * s, out=x)  # clip when using random_perspective()
+        # for x in (labels9[:, 1:], *segments9):
+        #     np.clip(x, 0, 2 * s, out=x)  # clip when using random_perspective()
         # img9, labels9 = replicate(img9, labels9)  # replicate
+        for x in (segments9):
+            np.clip(x, 0, 2 * s, out=x)  # clip when using random_perspective()
+        h_filter = 2 * s
+        w_filter = 2 * s
+        labels_mask = poly_filter(polys=labels9[:, 1:].copy(), h=h_filter, w=w_filter)
+        labels9 = labels9[labels_mask]
 
         # Augment
         img9, labels9, segments9 = copy_paste(img9, labels9, segments9, p=self.hyp['copy_paste'])
@@ -1087,7 +1175,8 @@ def verify_image_label(args):
             if nl:
                 # lb[nl, (class, x1, y1,  x2, y2, x3, y3, x4, y4)]
                 assert lb.shape[1] == 9, f'labels require 9 columns, {lb.shape[1]} columns detected'
-                assert (lb >= 0).all(), f'negative label values {lb[lb < 0]}'
+                # as for my blood vessel keypoint, their bounding boxes will out of domain with negative values
+                # assert (lb >= 0).all(), f'negative label values {lb[lb < 0]}'
                 # x, y, w, h should be normalized by image size
                 # assert (lb[:,
                 #         1:5] <= 1).all(), f'non-normalized or out of bounds coordinates {lb[:, 1:][lb[:, 1:] > 1]}'

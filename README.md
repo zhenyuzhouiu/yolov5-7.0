@@ -148,6 +148,13 @@ python train.py --data coco.yaml --epochs 300 --weights '' --cfg yolov5n.yaml  -
                                                                  yolov5x                    16
 ```
 
+```bash
+python -m torch.distributed.run --nproc_per_node 2 train.py --weights yolov5m.pt --cfg models/yolov5m-obb.yaml 
+       --data data/fingernail-obb.yaml --hyp data/hyps/hyp.fingernail-obb.yaml  --epochs 3000 --batch-size 4
+       --img 1920 --noautoanchor True --device 0,1
+
+```
+
 <img width="800" src="https://user-images.githubusercontent.com/26833433/90222759-949d8800-ddc1-11ea-9fa1-1c97eed2b963.png">
 
 </details>

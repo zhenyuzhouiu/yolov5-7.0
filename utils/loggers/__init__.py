@@ -165,6 +165,16 @@ class Loggers():
                 self.comet_logger.on_pretrain_routine_end(paths)
 
     def on_train_batch_end(self, model, ni, imgs, targets, paths, vals):
+        """
+        This function can save the training batch images of the first 3 epochs
+        :param model:
+        :param ni:
+        :param imgs:
+        :param targets:
+        :param paths:
+        :param vals:
+        :return:
+        """
         log_dict = dict(zip(self.keys[:3], vals))
         # Callback runs on train batch end
         # ni: number integrated batches (since train start)
