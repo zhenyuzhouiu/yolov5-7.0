@@ -590,6 +590,7 @@ class DetectMultiBackend(nn.Module):
 
     def warmup(self, imgsz=(1, 3, 640, 640)):
         """
+        Because the first time will cost more time to load and inference
         warmup model by running inference once
         :param imgsz:
         :return:

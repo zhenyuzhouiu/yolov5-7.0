@@ -43,7 +43,7 @@ from utils.callbacks import Callbacks
 from utils.dataloaders_obb import create_dataloader
 from utils.general_obb import (LOGGER, TQDM_BAR_FORMAT, Profile, check_dataset, check_img_size, check_requirements,
                                check_yaml, coco80_to_coco91_class, colorstr, increment_path, non_max_suppression,
-                               print_args, scale_boxes, xywh2xyxy, xyxy2xywh)
+                               print_args, scale_boxes, xywh2xyxy, xyxy2xywh, non_max_suppression_obb)
 # from utils.metrics import ConfusionMatrix, ap_per_class, box_iou
 from utils.metrics_obb import ConfusionMatrix, ap_per_class, box_iou
 # from utils.plots import output_to_target, plot_images, plot_val_study
@@ -107,7 +107,7 @@ def run(
         imgsz=640,  # inference size (pixels)
         conf_thres=0.001,  # confidence threshold
         iou_thres=0.6,  # NMS IoU threshold
-        max_det=300,  # maximum detections per image
+        max_det=1500,  # maximum detections per image
         task='val',  # train, val, test, speed or study
         device='',  # cuda device, i.e. 0 or 0,1,2,3 or cpu
         workers=8,  # max dataloader workers (per RANK in DDP mode)
@@ -131,6 +131,8 @@ def run(
         compute_loss=None,
 ):
     # Initialize/load model and set device
+    # During training process of train_obb.py, it will use model=ema.ema,
+    # while it uses attempt_load() for model
     training = model is not None
     if training:  # called by train.py
         device, pt, jit, engine = next(model.parameters()).device, True, False, False  # get model device, PyTorch model
@@ -196,6 +198,7 @@ def run(
     class_map = coco80_to_coco91_class() if is_coco else list(range(1000))
     s = ('%22s' + '%11s' * 6) % ('Class', 'Images', 'Instances', 'P', 'R', 'mAP50', 'mAP50-95')
     tp, fp, p, r, f1, mp, mr, map50, ap50, map = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+    # dt, p, r, f1, mp, mr, map50, map = [0.0, 0.0, 0.0], 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
     dt = Profile(), Profile(), Profile()  # profiling times
     # loss = torch.zeros(3, device=device)
     loss = torch.zeros(4, device=device)  # (box, obj, cls, angle)
@@ -215,6 +218,7 @@ def run(
         # Inference
         with dt[1]:
             # compute_loss is passed by compute_loss
+            # x if self.training else (torch.cat(z, 1),) if self.export else (torch.cat(z, 1), x)
             preds, train_out = model(im) if compute_loss else (model(im, augment=augment), None)
 
         # Loss
@@ -227,17 +231,21 @@ def run(
         # targets[:, 2:] *= torch.tensor((width, height, width, height), device=device)  # to pixels
         lb = [targets[targets[:, 0] == i, 1:] for i in range(nb)] if save_hybrid else []  # for autolabelling
         with dt[2]:
-            preds = non_max_suppression(preds,
-                                        conf_thres,
-                                        iou_thres,
-                                        labels=lb,
-                                        multi_label=True,
-                                        agnostic=single_cls,
-                                        max_det=max_det)
+            # input-> prediction (tensor): (b, n_all_anchors, [cx cy l s obj num_cls theta_cls])
+            # output-> list of detections,
+            #          len=batch_size, on (n,7) tensor per image [xylsθ, conf, cls] θ ∈ [-pi/2, pi/2)
+            preds = non_max_suppression_obb(preds,
+                                            conf_thres,
+                                            iou_thres,
+                                            labels=lb,
+                                            multi_label=True,
+                                            agnostic=single_cls,
+                                            max_det=max_det)
 
         # Metrics
         for si, pred in enumerate(preds):
-            labels = targets[targets[:, 0] == si, 1:]
+            # targets:  [index_of_batch clsid cx cy l s gaussian_θ_labels]
+            labels = targets[targets[:, 0] == si, 1:]  # labels (n_gt, [clsid, cx, cy, l, s, gaussian_θ_labels])
             nl, npr = labels.shape[0], pred.shape[0]  # number of labels, predictions
             path, shape = Path(paths[si]), shapes[si][0]
             correct = torch.zeros(npr, niou, dtype=torch.bool, device=device)  # init with correct.shape [npr, niou]
@@ -253,7 +261,8 @@ def run(
 
             # Predictions
             if single_cls:
-                pred[:, 5] = 0
+                # pred[:, 5] = 0
+                pred[:, 6] = 0
             predn = pred.clone()
             scale_boxes(im[si].shape[1:], predn[:, :4], shape, shapes[si][1])  # native-space pred
 

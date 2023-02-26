@@ -64,14 +64,15 @@ class Detect(nn.Module):
 
     def forward(self, x):
         """
+        For training, it will not sigmoid the output of model, otherwise with sigmoid function.
         :param x: x.dtype = list
         :return: training: return a list [head1, head2, head3], for each head [bs, 3, imgsz/stride, imgsz/stride, no)
-                 inference:
+                 inference: return a list [head1, head2, head3], for each head [bs, 3*(imgsz/stride)*(imgsz/stride), no)
         """
         z = []  # inference output
         for i in range(self.nl):
             x[i] = self.m[i](x[i])  # conv
-            # x[i].shape [bs, 3*(x+y+w+h+obj+nc), imgsz/strid, imgsz/strid]
+            # x[i].shape [bs, 3*(x+y+w+h+obj+nc+180), imgsz/strid, imgsz/strid]
             bs, _, ny, nx = x[i].shape  # x(bs,255,20,20) to x(bs,3,20,20,85)
             x[i] = x[i].view(bs, self.na, self.no, ny, nx).permute(0, 1, 3, 4, 2).contiguous()
 
@@ -91,10 +92,8 @@ class Detect(nn.Module):
                     xy, wh, conf, angle = x[i].sigmoid().split((2, 2, self.nc + 1, 180), 4)
                     xy = (xy * 2 - 0.5 + self.grid[i]) * self.stride[i]  # xy
                     wh = (wh * 2) ** 2 * self.anchor_grid[i]  # wh
-                    y = torch.cat((xy, wh, conf), 4)
-                # at 2023.02.23 12:01 am, it only supports hbb output for validation
-                # z.append(y.view(bs, self.na * nx * ny, self.no))
-                z.append(y.view(bs, self.na*nx*ny, 7))
+                    y = torch.cat((xy, wh, conf, angle), -1)
+                z.append(y.view(bs, self.na * nx * ny, self.no))  # z (list[p3_pred]): (b, 3*nx*ny, 187)
 
         return x if self.training else (torch.cat(z, 1),) if self.export else (torch.cat(z, 1), x)
 
