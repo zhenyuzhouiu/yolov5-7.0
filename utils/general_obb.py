@@ -979,7 +979,7 @@ def non_max_suppression(
         boxes, scores = x[:, :4] + c, x[:, 4]  # boxes (offset by class), scores
         i = torchvision.ops.nms(boxes, scores, iou_thres)  # NMS
         i = i[:max_det]  # limit detections
-        if merge and (1 < n < 3E3):  # Merge NMS (boxes merged using weighted mean)
+        if merge and (1 < n < 3E3):  # Merge NMS (boxes merged using weighted mean) for getting more precision results
             # update boxes as boxes(i,4) = weights(i,n) * boxes(n,4)
             iou = box_iou(boxes[i], boxes) > iou_thres  # iou matrix
             weights = iou * scores[None]  # box weights
@@ -1010,13 +1010,18 @@ def non_max_suppression_obb(
     """Runs Non-Maximum Suppression (NMS) on inference results_obb
     Args:
         prediction (tensor): (b, n_all_anchors, [cx cy l s obj num_cls theta_cls])
+        n_all_anchors = nl*(number anchor of each nl * grid x * grid y)
         agnostic (bool): True = NMS will be applied between elements of different categories
-        labels : () or
+        Agnostic runs NMS on all boxes togather rather than per class,
+        multi_label can assign multiple classes of detection per box.
+        labels : used for hybrid auto-labeling
 
     Returns:
         list of detections, len=batch_size, on (n,7) tensor per image [xylsθ, conf, cls] θ ∈ [-pi/2, pi/2)
+        as for conf = object conf * cls conf
     """
-
+    # prediction.shape: [bs, 3*gx*gy, 187]
+    # 187 = x, y, w, h, obj_conf, num_cls, num_angle_cls
     nc = prediction.shape[2] - 5 - 180  # number of classes
     xc = prediction[..., 4] > conf_thres  # candidates
     class_index = nc + 5
@@ -1026,20 +1031,22 @@ def non_max_suppression_obb(
     assert 0 <= iou_thres <= 1, f'Invalid IoU {iou_thres}, valid values are between 0.0 and 1.0'
 
     # Settings
-    max_wh = 4096 # min_wh, max_wh = 2, 4096  # (pixels) minimum and maximum box width and height
+    max_wh = 4096  # min_wh, max_wh = 2, 4096  # (pixels) minimum and maximum box width and height
     max_nms = 30000  # maximum number of boxes into torchvision.ops.nms()
     time_limit = 30.0  # seconds to quit after
     # redundant = True  # require redundant detections
     multi_label &= nc > 1  # multiple labels per box (adds 0.5ms/img)
 
     t = time.time()
+    # 7 for [x, y, l, s, angle, conf, cls_id]
     output = [torch.zeros((0, 7), device=prediction.device)] * prediction.shape[0]
-    for xi, x in enumerate(prediction):  # image index, image inference
-        # Apply constraints
+    for xi, x in enumerate(prediction):  # image index on batch size, image inference
+        # =================== Apply constraints
         # x[((x[..., 2:4] < min_wh) | (x[..., 2:4] > max_wh)).any(1), 4] = 0  # width-height
-        x = x[xc[xi]]  # confidence, (tensor): (n_conf_thres, [cx cy l s obj num_cls theta_cls])
+        x = x[xc[xi]]  # confidence, (tensor): (n_conf_thresh, [cx cy l s obj num_cls theta_cls])
 
-        # Cat apriori labels if autolabelling
+        # Cat apriori labels if auto-labelling
+        # concat prediction results and ground truth for nms
         if labels and len(labels[xi]):
             l = labels[xi]
             v = torch.zeros((len(l), nc + 5), device=x.device)
@@ -1052,21 +1059,23 @@ def non_max_suppression_obb(
         if not x.shape[0]:
             continue
 
-        # Compute conf
-        x[:, 5:class_index] *= x[:, 4:5]  # conf = obj_conf * cls_conf
+        # ==================== Compute conf
+        x[:, 5:class_index] *= x[:, 4:5]  # conf = cls_conf * obj_conf
 
-        _, theta_pred = torch.max(x[:, class_index:], 1,  keepdim=True) # [n_conf_thres, 1] θ ∈ int[0, 179]
-        theta_pred = (theta_pred - 90) / 180 * pi # [n_conf_thres, 1] θ ∈ [-pi/2, pi/2)
+        _, theta_pred = torch.max(x[:, class_index:], 1,  keepdim=True) # [n_conf_thresh, 1] θ ∈ int[0, 179]
+        # don't need change the angle the radian
+        # theta_pred = (theta_pred - 90) / 180 * pi # [n_conf_thresh, 1] θ ∈ [-pi/2, pi/2)
 
-        # Detections matrix nx7 (xyls, θ, conf, cls) θ ∈ [-pi/2, pi/2)
+        # Detections matrix nx7 (x, y, l, s, θ, conf, cls) θ ∈ [0, 180)
+        # multi_label represents each output (each bounding box) can have multiple cls
         if multi_label:
-            i, j = (x[:, 5:class_index] > conf_thres).nonzero(as_tuple=False).T # ()
+            i, j = (x[:, 5:class_index] > conf_thres).nonzero(as_tuple=False).T  # ()
             x = torch.cat((x[i, :4], theta_pred[i], x[i, j + 5, None], j[:, None].float()), 1)
         else:  # best class only
             conf, j = x[:, 5:class_index].max(1, keepdim=True)
             x = torch.cat((x[:, :4], theta_pred, conf, j.float()), 1)[conf.view(-1) > conf_thres]
 
-        # Filter by class
+        # ===================== Filter by class
         if classes is not None:
             x = x[(x[:, 6:7] == torch.tensor(classes, device=x.device)).any(1)]
 
@@ -1081,11 +1090,12 @@ def non_max_suppression_obb(
         elif n > max_nms:  # excess boxes
             x = x[x[:, 5].argsort(descending=True)[:max_nms]]  # sort by confidence
 
-        # Batched NMS
+        # ===================== Batched NMS
         c = x[:, 6:7] * (0 if agnostic else max_wh)  # classes
         rboxes = x[:, :5].clone()
-        rboxes[:, :2] = rboxes[:, :2] + c # rboxes (offset by class)
+        rboxes[:, :2] = rboxes[:, :2] + c  # rboxes (offset by class)
         scores = x[:, 5]  # scores
+        # torchvision.ops.nms() can support nus
         _, i = obb_nms(rboxes, scores, iou_thres)
         if i.shape[0] > max_det:  # limit detections
             i = i[:max_det]

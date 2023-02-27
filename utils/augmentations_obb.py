@@ -110,8 +110,19 @@ def replicate(im, labels):
 
 
 def letterbox(im, new_shape=(640, 640), color=(114, 114, 114), auto=True, scaleFill=False, scaleup=True, stride=32):
-    # It only changes the image data, and does not change the ground truth values
-    # Resize and pad image while meeting stride-multiple constraints
+    """
+    It only changes the image data, and does not change the ground truth values
+    Resize and pad image while meeting stride-multiple constraints
+    :param im:
+    :param new_shape:
+    :param color:
+    :param auto:
+    :param scaleFill:
+    :param scaleup:
+    :param stride:
+    :return: im, ratio, (dw, dh)
+    """
+
     shape = im.shape[:2]  # current shape [height, width]
     if isinstance(new_shape, int):
         new_shape = (new_shape, new_shape)

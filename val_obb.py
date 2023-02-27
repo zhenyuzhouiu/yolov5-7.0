@@ -197,6 +197,7 @@ def run(
         names = dict(enumerate(names))
     class_map = coco80_to_coco91_class() if is_coco else list(range(1000))
     s = ('%22s' + '%11s' * 6) % ('Class', 'Images', 'Instances', 'P', 'R', 'mAP50', 'mAP50-95')
+    # tp: true positive; fp: false positive
     tp, fp, p, r, f1, mp, mr, map50, ap50, map = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
     # dt, p, r, f1, mp, mr, map50, map = [0.0, 0.0, 0.0], 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
     dt = Profile(), Profile(), Profile()  # profiling times
@@ -219,6 +220,7 @@ def run(
         with dt[1]:
             # compute_loss is passed by compute_loss
             # x if self.training else (torch.cat(z, 1),) if self.export else (torch.cat(z, 1), x)
+            # preds: torch.cat(z, 1), train_out: x
             preds, train_out = model(im) if compute_loss else (model(im, augment=augment), None)
 
         # Loss
@@ -227,13 +229,15 @@ def run(
             loss += compute_loss(train_out, targets)[1]  # box, obj, cls, angle
 
         # NMS
-        # as for my finger nail dataset, the targets values are not normalized by image size
+        # as for my finger nail dataset,
+        # the ground truth (x1, y1, x2, y2, x3, y3, x4, y4) values are not normalized by image size
         # targets[:, 2:] *= torch.tensor((width, height, width, height), device=device)  # to pixels
+        # lb:-> list
         lb = [targets[targets[:, 0] == i, 1:] for i in range(nb)] if save_hybrid else []  # for autolabelling
         with dt[2]:
-            # input-> prediction (tensor): (b, n_all_anchors, [cx cy l s obj num_cls theta_cls])
+            # input-> prediction (tensor): (b, n_all_anchors, [cx cy l s obj num_cls angle_cls])
             # output-> list of detections,
-            #          len=batch_size, on (n,7) tensor per image [xylsθ, conf, cls] θ ∈ [-pi/2, pi/2)
+            # len=batch_size, on (n,7) tensor per image [xylsθ, conf, cls] θ ∈ [0, 180)
             preds = non_max_suppression_obb(preds,
                                             conf_thres,
                                             iou_thres,
@@ -264,13 +268,16 @@ def run(
                 # pred[:, 5] = 0
                 pred[:, 6] = 0
             predn = pred.clone()
+            # shapes: None or [(h_raw, w_raw), ((h_ratios, w_ratios), wh_paddings)], for COCO mAP rescaling
+            # shape: shapes[si][0]
+            # scale the predicted bounding boxes to original image
             scale_boxes(im[si].shape[1:], predn[:, :4], shape, shapes[si][1])  # native-space pred
 
             # Evaluate
             if nl:
                 tbox = xywh2xyxy(labels[:, 1:5])  # target boxes
                 scale_boxes(im[si].shape[1:], tbox, shape, shapes[si][1])  # native-space labels
-                labelsn = torch.cat((labels[:, 0:1], tbox), 1)  # native-space labels
+                labelsn = torch.cat((labels[:, 0:1], tbox), 1)  # native-space labels with [cls, x1, y1, x2, y2]
                 correct = process_batch(predn, labelsn, iouv)
                 if plots:
                     confusion_matrix.process_batch(predn, labelsn)
@@ -292,6 +299,7 @@ def run(
         callbacks.run('on_val_batch_end', batch_i, im, targets, paths, shapes, preds)
 
     # Compute metrics
+    # stats.append((correct, pred[:, 4], pred[:, 5], labels[:, 0]))  # (correct, conf, predicted cls, target cls)
     stats = [torch.cat(x, 0).cpu().numpy() for x in zip(*stats)]  # to numpy
     if len(stats) and stats[0].any():
         tp, fp, p, r, f1, ap, ap_class = ap_per_class(*stats, plot=plots, save_dir=save_dir, names=names)
