@@ -49,6 +49,7 @@ from utils.metrics_obb import ConfusionMatrix, ap_per_class, box_iou
 # from utils.plots import output_to_target, plot_images, plot_val_study
 from utils.plots_obb import output_to_target, plot_images, plot_val_study
 from utils.torch_utils import select_device, smart_inference_mode
+from utils.obb_utils import rbox2poly, poly2hbb
 
 
 def save_one_txt(predn, save_conf, shape, file):
@@ -203,6 +204,7 @@ def run(
     dt = Profile(), Profile(), Profile()  # profiling times
     # loss = torch.zeros(3, device=device)
     loss = torch.zeros(4, device=device)  # (box, obj, cls, angle)
+    # for stats, it will save (correct, conf, pcls, tcls)
     jdict, stats, ap, ap_class = [], [], [], []
     callbacks.run('on_val_start')
     pbar = tqdm(dataloader, desc=s, bar_format=TQDM_BAR_FORMAT)  # progress bar
@@ -242,7 +244,7 @@ def run(
                                             conf_thres,
                                             iou_thres,
                                             labels=lb,
-                                            multi_label=True,
+                                            multi_label=True,  # each bounding boxes can represent several classes
                                             agnostic=single_cls,
                                             max_det=max_det)
 
@@ -266,8 +268,14 @@ def run(
             # Predictions
             if single_cls:
                 # pred[:, 5] = 0
-                pred[:, 6] = 0
-            predn = pred.clone()
+                pred[:, 6] = 0  # [x,y,l,s,angle,conf,cls]
+            poly = rbox2poly(pred[:, :5])  # poly (n, 8)
+            pred_poly = torch.cat((poly, pred[:, -2:]), dim=1)  # (n, [poly, conf, cls])
+            # "poly2hbb" will get the minimum outer rectangle
+            hbbox = xywh2xyxy(poly2hbb(pred_poly[:, :8]))  # (n, [x1 y1 x2 y2])
+            pred_hbb = torch.cat((hbbox, pred_poly[:, -2:]), dim=1)  # (n, [xyxy, conf, cls])
+
+
             # shapes: None or [(h_raw, w_raw), ((h_ratios, w_ratios), wh_paddings)], for COCO mAP rescaling
             # shape: shapes[si][0]
             # scale the predicted bounding boxes to original image
