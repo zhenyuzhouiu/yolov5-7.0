@@ -43,7 +43,7 @@ from utils.callbacks import Callbacks
 from utils.dataloaders_obb import create_dataloader
 from utils.general_obb import (LOGGER, TQDM_BAR_FORMAT, Profile, check_dataset, check_img_size, check_requirements,
                                check_yaml, coco80_to_coco91_class, colorstr, increment_path, non_max_suppression,
-                               print_args, scale_boxes, xywh2xyxy, xyxy2xywh, non_max_suppression_obb)
+                               print_args, scale_boxes, xywh2xyxy, xyxy2xywh, non_max_suppression_obb, scale_polys)
 # from utils.metrics import ConfusionMatrix, ap_per_class, box_iou
 from utils.metrics_obb import ConfusionMatrix, ap_per_class, box_iou
 # from utils.plots import output_to_target, plot_images, plot_val_study
@@ -62,17 +62,26 @@ def save_one_txt(predn, save_conf, shape, file):
             f.write(('%g ' * len(line)).rstrip() % line + '\n')
 
 
-def save_one_json(predn, jdict, path, class_map):
+def save_one_json(pred_hbbn, pred_polyn, jdict, path, class_map):
+    """
+    Save one JSON result {"image_id": 42, "category_id": 18, "bbox": [258.15, 41.29, 348.26, 243.78], "score": 0.236, "poly": [...]}
+    Args:
+        pred_hbbn (tensor): (n, [poly, conf, cls])
+        pred_polyn (tensor): (n, [xyxy, conf, cls])
+    """
     # Save one JSON result {"image_id": 42, "category_id": 18, "bbox": [258.15, 41.29, 348.26, 243.78], "score": 0.236}
     image_id = int(path.stem) if path.stem.isnumeric() else path.stem
-    box = xyxy2xywh(predn[:, :4])  # xywh
+    box = xyxy2xywh(pred_hbbn[:, :4])  # xywh
     box[:, :2] -= box[:, 2:] / 2  # xy center to top-left corner
-    for p, b in zip(predn.tolist(), box.tolist()):
+    for p, b in zip(pred_polyn.tolist(), box.tolist()):
         jdict.append({
             'image_id': image_id,
-            'category_id': class_map[int(p[5])],
+            'category_id': class_map[int(p[-1])],
             'bbox': [round(x, 3) for x in b],
-            'score': round(p[4], 5)})
+            'score': round(p[-2], 5),
+            'poly': [round(x, 1) for x in p[:8]],
+            'file_name': path.stem
+        })
 
 
 def process_batch(detections, labels, iouv):
@@ -275,28 +284,35 @@ def run(
             hbbox = xywh2xyxy(poly2hbb(pred_poly[:, :8]))  # (n, [x1 y1 x2 y2])
             pred_hbb = torch.cat((hbbox, pred_poly[:, -2:]), dim=1)  # (n, [xyxy, conf, cls])
 
-
+            pred_polyn = pred_poly.clone()  # predn (tensor): (n, [poly, conf, cls]
             # shapes: None or [(h_raw, w_raw), ((h_ratios, w_ratios), wh_paddings)], for COCO mAP rescaling
             # shape: shapes[si][0]
             # scale the predicted bounding boxes to original image
-            scale_boxes(im[si].shape[1:], predn[:, :4], shape, shapes[si][1])  # native-space pred
+            scale_polys(im[si].shape[1:], pred_polyn[:, :8], shape, shapes[si][1])  # native space
+            hbboxn = xywh2xyxy(poly2hbb(pred_polyn[:, :8]))
+            pred_hbbn = torch.cat((hbboxn, pred_polyn[:, -2:]), dim=1)
 
             # Evaluate
             if nl:
-                tbox = xywh2xyxy(labels[:, 1:5])  # target boxes
-                scale_boxes(im[si].shape[1:], tbox, shape, shapes[si][1])  # native-space labels
-                labelsn = torch.cat((labels[:, 0:1], tbox), 1)  # native-space labels with [cls, x1, y1, x2, y2]
-                correct = process_batch(predn, labelsn, iouv)
+                # labels [clsid, x, y, l, s, gaussian_a_cls]
+                # keepdim=True can promise the max_index has the same tensor shape as the input
+                _, angle_labels = torch.max(labels[:, 5:], 1, keepdim=True)
+                rlabels = torch.cat((labels[:, 1:5], angle_labels), dim=1)
+                tpoly = rbox2poly(rlabels)
+                scale_polys(im[si].shape[1:], tpoly, shape, shapes[si][1])  # native space labels
+                tbox = xywh2xyxy(poly2hbb(tpoly))
+                labels_hbbn = torch.cat((labels[:, 0:1], tbox), 1)  # native-space labels with [cls, x1, y1, x2, y2]
+                correct = process_batch(pred_hbbn, labels_hbbn, iouv)
                 if plots:
-                    confusion_matrix.process_batch(predn, labelsn)
-            stats.append((correct, pred[:, 4], pred[:, 5], labels[:, 0]))  # (correct, conf, predicted cls, target cls)
+                    confusion_matrix.process_batch(pred_hbbn, labels_hbbn)
+            stats.append((correct, pred_poly[:, 8], pred_poly[:, 9], labels[:, 0]))  # (correct, conf, predicted cls, target cls)
 
             # Save/log
             if save_txt:
-                save_one_txt(predn, save_conf, shape, file=save_dir / 'labels' / f'{path.stem}.txt')
+                save_one_txt(pred_hbbn, save_conf, shape, file=save_dir / 'labels' / f'{path.stem}.txt')
             if save_json:
-                save_one_json(predn, jdict, path, class_map)  # append to COCO-JSON dictionary
-            callbacks.run('on_val_image_end', pred, predn, path, names, im[si])
+                save_one_json(pred_hbbn, pred_polyn, jdict, path, class_map)  # append to COCO-JSON dictionary
+            callbacks.run('on_val_image_end', pred_hbb, pred_hbbn, path, names, im[si])
 
         # Plot images for validation valid_batch(id)_labels & prediction,
         # for the train_batch(id), it will on the Loggers class
