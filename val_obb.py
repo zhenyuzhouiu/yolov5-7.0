@@ -218,6 +218,11 @@ def run(
     callbacks.run('on_val_start')
     pbar = tqdm(dataloader, desc=s, bar_format=TQDM_BAR_FORMAT)  # progress bar
     for batch_i, (im, targets, paths, shapes) in enumerate(pbar):
+        # img(tensor): (3, height, width), RGB
+        # labels_out(tensor): (n, [None clsid cx cy l s gaussian_θ_labels])
+        # θ∈[-pi / 2, pi / 2)
+        # img_file(str): img_dir
+        # shapes: None or [(h_raw, w_raw), ((h_ratios, w_ratios), wh_paddings)], for COCO mAP rescaling
         callbacks.run('on_val_batch_start')
         with dt[0]:
             if cuda:
@@ -317,6 +322,7 @@ def run(
         # Plot images for validation valid_batch(id)_labels & prediction,
         # for the train_batch(id), it will on the Loggers class
         if plots and batch_i < 3:
+            # the im is not the original image of the dataset
             plot_images(im, targets, paths, save_dir / f'val_batch{batch_i}_labels.jpg', names)  # labels
             plot_images(im, output_to_target(preds), paths, save_dir / f'val_batch{batch_i}_pred.jpg', names)  # pred
 

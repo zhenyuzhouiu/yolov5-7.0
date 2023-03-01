@@ -41,7 +41,8 @@ if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))  # add ROOT to PATH
 ROOT = Path(os.path.relpath(ROOT, Path.cwd()))  # relative
 
-import val as validate  # for end-of-epoch mAP
+# import val as validate  # for end-of-epoch mAP
+import val_obb as validate
 from models.experimental import attempt_load
 # only use the small object head
 # from models.yolo_small import Model
@@ -52,7 +53,7 @@ from utils.callbacks import Callbacks
 # from utils.dataloaders import create_dataloader
 from utils.dataloaders_obb import create_dataloader
 from utils.downloads import attempt_download, is_url
-from utils.general import (LOGGER, TQDM_BAR_FORMAT, check_amp, check_dataset, check_file, check_git_info,
+from utils.general_obb import (LOGGER, TQDM_BAR_FORMAT, check_amp, check_dataset, check_file, check_git_info,
                            check_git_status, check_img_size, check_requirements, check_suffix, check_yaml, colorstr,
                            get_latest_run, increment_path, init_seeds, intersect_dicts, labels_to_class_weights,
                            labels_to_image_weights, methods, one_cycle, print_args, print_mutation, strip_optimizer,
@@ -110,7 +111,14 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
     data_dict = None
     # RANK value set -1 when can not access from the os.getenv('RANK', -1)
     if RANK in {-1, 0}:
-        loggers = Loggers(save_dir, weights, opt, hyp, LOGGER)  # loggers instance
+        # loggers instance for oriented bounding boxes
+        loggers = Loggers(save_dir, weights, opt, hyp, LOGGER, keys=['train/box_loss', 'train/obj_loss',
+                                                                     'train/cls_loss', 'train/theta_loss',
+                                                                     'metrics/precision', 'metrics/recall',
+                                                                     'metrics/HBBmAP.5', 'metrics/HBBmAP.5:.95',
+                                                                     'val/box_loss', 'val/obj_loss',
+                                                                     'val/cls_loss', 'val/theta_loss',
+                                                                     'x/lr0', 'x/lr1', 'x/lr2'])
 
         # Register actions
         for k in methods(loggers):
@@ -365,7 +373,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                 # Unscales the gradients of optimizer's assigned params in-place
                 scaler.unscale_(optimizer)  # unscale gradients
                 # Since the gradients of optimizer's assigned params are unscaled, clips as usual:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)  # clip gradients
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0, error_if_nonfinite=False)  # clip gradients
                 # optimizer's gradients are already unscaled, so scaler.step does not unscale them,
                 # although it still skips optimizer.step() if the gradients contain infs or NaNs.
                 scaler.step(optimizer)  # optimizer.step
@@ -491,8 +499,8 @@ def parse_opt(known=False):
     parser.add_argument('--data', type=str, default=ROOT / 'data/fingernail-obb.yaml', help='dataset.yaml path')
     parser.add_argument('--hyp', type=str, default=ROOT / 'data/hyps/hyp.fingernail-obb.yaml', help='hyperparameters path')
     parser.add_argument('--epochs', type=int, default=3000, help='total training epochs')
-    parser.add_argument('--batch-size', type=int, default=1, help='total batch size for all GPUs, -1 for autobatch')
-    parser.add_argument('--imgsz', '--img', '--img-size', type=int, default=640, help='train, val image size (pixels)')
+    parser.add_argument('--batch-size', type=int, default=2, help='total batch size for all GPUs, -1 for autobatch')
+    parser.add_argument('--imgsz', '--img', '--img-size', type=int, default=1920, help='train, val image size (pixels)')
     # store_true is ture when the action is triggered and false if it is not
     # Rectangular training attempts to sort all of your training images by aspect ratio,
     # and then groups similar aspect ratio images into a single batch.
@@ -505,7 +513,7 @@ def parse_opt(known=False):
     parser.add_argument('--nosave', action='store_true', help='only save final checkpoint')
     parser.add_argument('--noval', action='store_true', help='only validate final epoch')
     # replace the anchor of cfg by autoanchor
-    parser.add_argument('--noautoanchor', action='store_true', help='disable AutoAnchor')
+    parser.add_argument('--noautoanchor', action='store_true', default=True, help='disable AutoAnchor')
     # parser.add_argument('--noautoanchor', action='store_true', default=True, help='disable AutoAnchor')
     parser.add_argument('--noplots', action='store_true', help='save no plot files')
     parser.add_argument('--evolve', type=int, nargs='?', const=300, help='evolve hyperparameters for x generations')
@@ -523,8 +531,8 @@ def parse_opt(known=False):
     parser.add_argument('--optimizer', type=str, choices=['SGD', 'Adam', 'AdamW'], default='SGD', help='optimizer')
     parser.add_argument('--sync-bn', action='store_true', help='use SyncBatchNorm, only available in DDP mode')
     parser.add_argument('--workers', type=int, default=8, help='max dataloader workers (per RANK in DDP mode)')
-    parser.add_argument('--project', default=ROOT / 'runs/train', help='save to project/name')
-    parser.add_argument('--name', default='fingernail-obb', help='save to project/name')
+    parser.add_argument('--project', default=ROOT / 'fingernail-obb', help='save to project/name')
+    parser.add_argument('--name', default='exp', help='save to project/name')
     parser.add_argument('--exist-ok', action='store_true', help='existing project/name ok, do not increment')
     parser.add_argument('--quad', action='store_true', help='quad dataloader')
     parser.add_argument('--cos-lr', action='store_true', help='cosine LR scheduler')

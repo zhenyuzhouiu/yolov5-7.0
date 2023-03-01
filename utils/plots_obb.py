@@ -76,12 +76,37 @@ class Annotator:
         self.pil = pil or non_ascii
         if self.pil:  # use PIL
             self.im = im if isinstance(im, Image.Image) else Image.fromarray(im)
+            self.im_cv2 = im
             self.draw = ImageDraw.Draw(self.im)
             self.font = check_pil_font(font='Arial.Unicode.ttf' if non_ascii else font,
                                        size=font_size or max(round(sum(self.im.size) / 2 * 0.035), 12))
         else:  # use cv2
             self.im = im
+            self.im_cv2 = im
         self.lw = line_width or max(round(sum(im.shape) / 2 * 0.003), 2)  # line width
+
+    def poly_label(self, poly, label='', color=(128, 128, 128), txt_color=(255, 255, 255)):
+        if isinstance(poly, torch.Tensor):
+            poly = poly.cpu().numpy()
+        if isinstance(poly[0], torch.Tensor):
+            poly = [x.cpu().numpy() for x in poly]
+        polygon_list = np.array([(poly[0], poly[1]), (poly[2], poly[3]),
+                                 (poly[4], poly[5]), (poly[6], poly[7])], np.int32)
+        cv2.drawContours(image=self.im_cv2, contours=[polygon_list], contourIdx=-1, color=color, thickness=self.lw)
+        if label:
+            tf = max(self.lw - 1, 1)  # font thicknes
+            xmax, xmin, ymax, ymin = max(poly[0::2]), min(poly[0::2]), max(poly[1::2]), min(poly[1::2])
+            x_label, y_label = int((xmax + xmin) / 2), int((ymax + ymin) / 2)
+            w, h = cv2.getTextSize(label, 0, fontScale=self.lw / 3, thickness=tf)[0]  # text width, height
+            cv2.rectangle(
+                self.im_cv2,
+                (x_label, y_label),
+                (x_label + w + 1, y_label + int(1.5 * h)),
+                color, -1, cv2.LINE_AA
+            )
+            cv2.putText(self.im_cv2, label, (x_label, y_label + h), 0, self.lw / 3, txt_color, thickness=tf,
+                        lineType=cv2.LINE_AA)
+        self.im = self.im_cv2 if isinstance(self.im_cv2, Image.Image) else Image.fromarray(self.im_cv2)
 
     def box_label(self, box, label='', color=(128, 128, 128), txt_color=(255, 255, 255)):
         # Add one xyxy box to image with label
@@ -216,23 +241,21 @@ def butter_lowpass_filtfilt(data, cutoff=1500, fs=50000, order=5):
     return filtfilt(b, a, data)  # forward-backward filter
 
 
-def output_to_target(output, max_det=300):
-    # Convert model output to target format [batch_id, class_id, x, y, w, h, conf] for plotting
-    targets = []
-    for i, o in enumerate(output):
-        box, conf, cls = o[:max_det, :6].cpu().split((4, 1, 1), 1)
-        j = torch.full((conf.shape[0], 1), i)
-        targets.append(torch.cat((j, cls, xyxy2xywh(box), conf), 1))
-    return torch.cat(targets, 0).numpy()
-
-
 @threaded
-def plot_images(images, targets, paths=None, fname='images.jpg', names=None, max_size=2048, max_subplots=4):
+def plot_images(images,
+                targets,
+                paths=None,
+                fname='images.jpg',
+                names=None,
+                max_size=2048,  # maximum image size
+                max_subplots=4*4,
+                conf_thres=0.1):
     """
+
     Args:
         imgs (tensor): (b, 3, height, width)
-        targets_train (tensor): (n_targets, [batch_id clsid cx cy l s theta gaussian_θ_labels]) θ∈[-pi/2, pi/2)
-        targets_pred (array): (n, [batch_id, class_id, cx, cy, l, s, theta, conf]) θ∈[-pi/2, pi/2)
+        targets_train (tensor): (n_targets, [batch_id clsid cx cy l s gaussian_θ_labels]) θ∈[0, 180)
+        targets_pred (array): (n, [batch_id, class_id, cx, cy, l, s, theta, conf]) θ∈[0, 180)
         paths (list[str,...]): (b)
         fname (str): (1)
         names :
@@ -247,7 +270,7 @@ def plot_images(images, targets, paths=None, fname='images.jpg', names=None, max
         images *= 255  # de-normalise (optional)
     bs, _, h, w = images.shape  # batch size, _, height, width
     bs = min(bs, max_subplots)  # limit plot images
-    ns = np.ceil(bs ** 0.5)  # number of subplots (square)
+    ns = np.ceil(bs ** 0.5)  # number of subplots on the val_batchx_pred.jpg (square)
 
     # Build Image
     mosaic = np.full((int(ns * h), int(ns * w), 3), 255, dtype=np.uint8)  # init
@@ -274,44 +297,31 @@ def plot_images(images, targets, paths=None, fname='images.jpg', names=None, max
         if paths:
             annotator.text((x + 5, y + 5 + h), text=Path(paths[i]).name[:40], txt_color=(220, 220, 220))  # filenames
         if len(targets) > 0:
-            ti = targets[targets[:, 0] == i]  # image targets, (n, [img_index clsid cx cy l s theta gaussian_θ_labels])
-            # boxes = xywh2xyxy(ti[:, 2:6]).T
-            rboxes = ti[:, 2:7]
+            # targets_train (tensor): (n_targets, [batch_id clsid cx cy l s gaussian_θ_labels]) θ∈[0, 180)
+            # targets_pred (array): (n, [batch_id, class_id, cx, cy, l, s, theta, conf]) θ∈[0, 180)
+            ti = targets[targets[:, 0] == i]
+            if ti.shape[1] == 186:  # the ti is not from targets_pred
+                angle_labels = np.argmax(ti[:, 6:], axis=1, keepdims=True)
+                rboxes = np.concatenate((ti[:, 2:6], angle_labels), axis=1)
+            else:
+                rboxes = ti[:, 2:7]
             classes = ti[:, 1].astype('int')
-            # labels = ti.shape[1] == 6  # labels if no conf column
-            labels = ti.shape[1] == 187  # labels if no conf column
-            # conf = None if labels else ti[:, 6]  # check for confidence presence (label vs pred)
+            labels = ti.shape[1] == 186  # labels=True if no conf column on the targets_train
             conf = None if labels else ti[:, 7]  # check for confidence presence (label vs pred)
 
-            # if boxes.shape[1]:
-            #     if boxes.max() <= 1.01:  # if normalized with tolerance 0.01
-            #         boxes[[0, 2]] *= w  # scale to pixels
-            #         boxes[[1, 3]] *= h
-            #     elif scale < 1:  # absolute coords need scale if image scales
-            #         boxes *= scale
             polys = rbox2poly(rboxes)
             if scale < 1:
                 polys *= scale
-            # boxes[[0, 2]] += x
-            # boxes[[1, 3]] += y
             polys[:, [0, 2, 4, 6]] += x
             polys[:, [1, 3, 5, 7]] += y
-            # for j, box in enumerate(boxes.T.tolist()):
-            #     cls = classes[j]
-            #     color = colors(cls)
-            #     cls = names[cls] if names else cls
-            #     if labels or conf[j] > 0.25:  # 0.25 conf thresh
-            #         label = f'{cls}' if labels else f'{cls} {conf[j]:.1f}'
-            #         annotator.box_label(box, label, color=color)
             for j, poly in enumerate(polys.tolist()):
                 cls = classes[j]
                 color = colors(cls)
                 cls = names[cls] if names else cls
-                if labels or conf[j] > 0.25:  # 0.25 conf thresh
+                if labels or conf[j] > conf_thres:  # default conf thresh 0.1
                     label = f'{cls}' if labels else f'{cls} {conf[j]:.1f}'
                     annotator.poly_label(poly, label, color=color)
     annotator.im.save(fname)  # save
-
 
 
 def plot_lr_scheduler(optimizer, scheduler, epochs=300, save_dir=''):
@@ -581,3 +591,17 @@ def save_one_box(xyxy, im, file=Path('im.jpg'), gain=1.02, pad=10, square=False,
         # cv2.imwrite(f, crop)  # save BGR, https://github.com/ultralytics/yolov5/issues/7007 chroma subsampling issue
         Image.fromarray(crop[..., ::-1]).save(f, quality=95, subsampling=0)  # save RGB
     return crop
+
+
+def output_to_target(output, max_det=3000):
+    """
+    Convert after nms prediction output to target format [batch_id, class_id, x, y, l, s, theta, conf]
+    :param output: after nms prediction len(list*(n, [xylsθ, conf, cls]) θ ∈ [0, 180))=batch size
+    :return: targets [bs, n
+    """
+    targets = []
+    for i, o in enumerate(output):
+        rbox, conf, cls = o[:max_det, :7].cpu().split((5, 1, 1), 1)
+        j = torch.full((conf.shape[0], 1), i)
+        targets.append(torch.cat((j, cls, rbox, conf), 1))  # [n, (batch_id, cls_id, x, y, l, s, a, cof)]
+    return torch.cat(targets, 0).numpy()

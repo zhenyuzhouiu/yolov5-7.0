@@ -11,10 +11,10 @@ import pkg_resources as pkg
 import torch
 from torch.utils.tensorboard import SummaryWriter
 
-from utils.general import LOGGER, colorstr, cv2
+from utils.general_obb import LOGGER, colorstr, cv2
 from utils.loggers.clearml.clearml_utils import ClearmlLogger
 from utils.loggers.wandb.wandb_utils import WandbLogger
-from utils.plots import plot_images, plot_labels, plot_results
+from utils.plots_obb import plot_images, plot_labels, plot_results
 from utils.torch_utils import de_parallel
 
 LOGGERS = ('csv', 'tb', 'wandb', 'clearml', 'comet')  # *.csv, TensorBoard, Weights & Biases, ClearML
@@ -56,7 +56,25 @@ except (ModuleNotFoundError, ImportError, AssertionError):
 
 class Loggers():
     # YOLOv5 Loggers class
-    def __init__(self, save_dir=None, weights=None, opt=None, hyp=None, logger=None, include=LOGGERS):
+    def __init__(self, save_dir=None,
+                 weights=None,
+                 opt=None,
+                 hyp=None,
+                 logger=None,
+                 include=LOGGERS,
+                 keys = ['train/box_loss',
+                         'train/obj_loss',
+                         'train/cls_loss',
+                         'metrics/precision',
+                         'metrics/recall',
+                         'metrics/mAP_0.5',
+                         'metrics/mAP_0.5:0.95',
+                         'val/box_loss',
+                         'val/obj_loss',
+                         'val/cls_loss',
+                         'x/lr0',
+                         'x/lr1',
+                         'x/lr2']):
         self.save_dir = save_dir
         self.weights = weights
         self.opt = opt
@@ -64,20 +82,7 @@ class Loggers():
         self.plots = not opt.noplots  # plot results
         self.logger = logger  # for printing results to console
         self.include = include
-        self.keys = [
-            'train/box_loss',
-            'train/obj_loss',
-            'train/cls_loss',  # train loss
-            'metrics/precision',
-            'metrics/recall',
-            'metrics/mAP_0.5',
-            'metrics/mAP_0.5:0.95',  # metrics
-            'val/box_loss',
-            'val/obj_loss',
-            'val/cls_loss',  # val loss
-            'x/lr0',
-            'x/lr1',
-            'x/lr2']  # params
+        self.keys = keys
         self.best_keys = ['best/epoch', 'best/precision', 'best/recall', 'best/mAP_0.5', 'best/mAP_0.5:0.95']
         for k in LOGGERS:
             setattr(self, k, None)  # init empty logger dictionary

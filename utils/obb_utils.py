@@ -69,7 +69,8 @@ def rbox2poly(obboxes):
     if isinstance(obboxes, torch.Tensor):
         # angle [0, 180)
         center, w, h, angle = obboxes[:, :2], obboxes[:, 2:3], obboxes[:, 3:4], obboxes[:, 4:5]
-        radian = (angle-90)/180*pi  # [-pi/2, pi/2)
+        # radian = (angle-90)/180*pi  # [-pi/2, pi/2)
+        radian = angle/180*pi  # [0, pi)
         Cos, Sin = torch.cos(radian), torch.sin(radian)
 
         vector1 = torch.cat(
@@ -85,7 +86,8 @@ def rbox2poly(obboxes):
             (point1, point2, point3, point4), dim=-1).reshape(*order, 8)
     else:
         center, w, h, angle = np.split(obboxes, (2, 3, 4), axis=-1)
-        radian = (angle-90)/180*pi  # [-pi/2, pi/2)
+        # radian = (angle-90)/180*pi  # [-pi/2, pi/2)
+        radian = angle/180*pi  # [0, pi)
         Cos, Sin = np.cos(radian), np.sin(radian)
 
         vector1 = np.concatenate(
@@ -182,3 +184,4 @@ def poly2obb(polys, num_cls_angle=180, radius=6.0, use_gaussian=True):
 
 
 if __name__ == "__main__":
+    print("For testing rbox2poly function")
