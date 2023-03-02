@@ -12,6 +12,7 @@ angle: 0.5
 angle_pw: 1.0
 obj: 1.0
 obj_pw: 1.0
+pos: 0.5
 iou_t: 0.2
 anchor_t: 4.0
 fl_gamma: 1.5

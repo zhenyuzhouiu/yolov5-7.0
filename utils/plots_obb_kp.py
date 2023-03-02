@@ -20,12 +20,11 @@ import torch
 from PIL import Image, ImageDraw, ImageFont
 
 from utils import TryExcept, threaded
-from utils.general_obb import (CONFIG_DIR, FONT, LOGGER, check_font, check_requirements, clip_boxes, increment_path,
-                               is_ascii, xywh2xyxy, xyxy2xywh)
-from utils.metrics_obb import fitness
+from utils.general_obb_kp import (CONFIG_DIR, FONT, LOGGER, check_font, check_requirements, clip_boxes, increment_path,
+                           is_ascii, xywh2xyxy, xyxy2xywh)
+from utils.metrics_obb_kp import fitness
 from utils.segment.general import scale_image
 from utils.obb_utils import rbox2poly
-
 # Settings
 RANK = int(os.getenv('RANK', -1))
 matplotlib.rc('font', **{'size': 11})
@@ -248,7 +247,7 @@ def plot_images(images,
                 fname='images.jpg',
                 names=None,
                 max_size=2048,  # maximum image size
-                max_subplots=4 * 4,
+                max_subplots=4*4,
                 conf_thres=0.1):
     """
 

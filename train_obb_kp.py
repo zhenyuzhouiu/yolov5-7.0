@@ -42,30 +42,32 @@ if str(ROOT) not in sys.path:
 ROOT = Path(os.path.relpath(ROOT, Path.cwd()))  # relative
 
 # import val as validate  # for end-of-epoch mAP
-import val_obb as validate
+import val_obb_kp as validate
 from models.experimental import attempt_load
 # only use the small object head
 # from models.yolo_small import Model
-from models.yolo_obb import Model
+from models.yolo_obb_kp import Model
 from utils.autoanchor import check_anchors
 from utils.autobatch import check_train_batch_size
 from utils.callbacks import Callbacks
 # from utils.dataloaders import create_dataloader
-from utils.dataloaders_obb import create_dataloader
+from utils.dataloaders_obb_kp import create_dataloader
 from utils.downloads import attempt_download, is_url
-from utils.general_obb import (LOGGER, TQDM_BAR_FORMAT, check_amp, check_dataset, check_file, check_git_info,
-                               check_git_status, check_img_size, check_requirements, check_suffix, check_yaml, colorstr,
-                               get_latest_run, increment_path, init_seeds, intersect_dicts, labels_to_class_weights,
-                               labels_to_image_weights, methods, one_cycle, print_args, print_mutation, strip_optimizer,
-                               yaml_save)
+from utils.general_obb_kp import (LOGGER, TQDM_BAR_FORMAT, check_amp, check_dataset, check_file, check_git_info,
+                                  check_git_status, check_img_size, check_requirements, check_suffix, check_yaml,
+                                  colorstr,
+                                  get_latest_run, increment_path, init_seeds, intersect_dicts, labels_to_class_weights,
+                                  labels_to_image_weights, methods, one_cycle, print_args, print_mutation,
+                                  strip_optimizer,
+                                  yaml_save)
 from utils.loggers import Loggers
 from utils.loggers.comet.comet_utils import check_comet_resume
 # from utils.loss import ComputeLoss
-from utils.loss_obb import ComputeLoss
+from utils.loss_obb_kp import ComputeLoss
 # from utils.metrics import fitness
-from utils.metrics_obb import fitness
+from utils.metrics_obb_kp import fitness
 # from utils.plots import plot_evolve
-from utils.plots_obb import plot_evolve
+from utils.plots_obb_kp import plot_evolve
 from utils.torch_utils import (EarlyStopping, ModelEMA, de_parallel, select_device, smart_DDP, smart_optimizer,
                                smart_resume, torch_distributed_zero_first)
 

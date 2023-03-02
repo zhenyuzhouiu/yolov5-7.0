@@ -7,7 +7,7 @@ Loss functions
 import torch
 import torch.nn as nn
 
-from utils.metrics_obb import bbox_iou
+from utils.metrics_obb_kp import bbox_iou
 from utils.torch_utils import de_parallel
 
 
@@ -108,6 +108,7 @@ class ComputeLoss:
         BCEcls = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([h['cls_pw']], device=device))
         BCEobj = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([h['obj_pw']], device=device))
         BCEangle = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([h['angle_pw']], device=device))
+        MSEpos = nn.MSELoss()
 
 
         # Class label smoothing https://arxiv.org/pdf/1902.04103.pdf eqn 3
@@ -118,7 +119,8 @@ class ComputeLoss:
         # Focal loss
         g = h['fl_gamma']  # focal loss gamma
         if g > 0:
-            BCEcls, BCEobj, BCEangle = FocalLoss(BCEcls, g), FocalLoss(BCEobj, g), FocalLoss(BCEangle, g)
+            BCEcls, BCEobj, BCEangle, MSEpos = FocalLoss(BCEcls, g), FocalLoss(BCEobj, g), \
+                FocalLoss(BCEangle, g), FocalLoss(MSEpos, g)
 
         m = de_parallel(model).model[-1]  # Detect() module
         self.stride = m.stride  # tensor([8, 16, 32,...])
@@ -127,6 +129,7 @@ class ComputeLoss:
         self.ssi = list(m.stride).index(16) if autobalance else 0  # stride 16 index
         self.BCEcls, self.BCEobj, self.BBCEangle, self.gr, self.hyp, self.autobalance = \
             BCEcls, BCEobj, BCEangle, 1.0, h, autobalance
+        self.MSEpos = MSEpos
         self.na = m.na  # number of anchors
         self.nc = m.nc  # number of classes
         self.nl = m.nl  # number of layers
@@ -143,6 +146,7 @@ class ComputeLoss:
         lbox = torch.zeros(1, device=self.device)  # box loss
         lobj = torch.zeros(1, device=self.device)  # object loss
         langle = torch.zeros(1, device=self.device)  # angle loss
+        lpos = torch.zeros(1, device=self.device)  # pos loss
         # indices [image batch id, anchor id, gj, gi]
         tcls, tbox, indices, anchors, tangle = self.build_targets(p, targets)  # targets
 
@@ -208,9 +212,10 @@ class ComputeLoss:
         lobj *= self.hyp['obj']
         lcls *= self.hyp['cls']
         langle *= self.hyp['angle']
+        lpos *= self.hyp['pos']
         bs = tobj.shape[0]  # batch size
 
-        return (lbox + lobj + lcls + langle) * bs, torch.cat((lbox, lobj, lcls, langle)).detach()
+        return (lbox + lobj + lcls + langle + lpos) * bs, torch.cat((lbox, lobj, lcls, langle, lpos)).detach()
 
     def build_targets(self, p, targets):
         """

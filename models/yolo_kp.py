@@ -1,6 +1,6 @@
 # Based on the original yolo_obb.py module
 """
-yolo_small.py only use the minimal stride output head for detecting small object
+yolo_kp.py only use the minimal stride output head for detecting small object
 for example: stride 8
 """
 

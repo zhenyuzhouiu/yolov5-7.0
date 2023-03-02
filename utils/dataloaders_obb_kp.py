@@ -30,11 +30,11 @@ from tqdm import tqdm
 
 # from utils.augmentations import (Albumentations, augment_hsv, classify_albumentations, classify_transforms, copy_paste,
 #                                  letterbox, mixup, random_perspective)
-from utils.augmentations_obb import (Albumentations, augment_hsv, classify_albumentations, classify_transforms,
-                                     copy_paste, letterbox, mixup, random_perspective)
-from utils.general_obb import (DATASETS_DIR, LOGGER, NUM_THREADS, TQDM_BAR_FORMAT, check_dataset, check_requirements,
-                               check_yaml, clean_str, cv2, is_colab, is_kaggle, segments2boxes, unzip_file, xyn2xy,
-                               xywh2xyxy, xywhn2xyxy, xyxy2xywhn)
+from utils.augmentations_obb_kp import (Albumentations, augment_hsv, classify_albumentations, classify_transforms,
+                                        copy_paste, letterbox, mixup, random_perspective)
+from utils.general_obb_kp import (DATASETS_DIR, LOGGER, NUM_THREADS, TQDM_BAR_FORMAT, check_dataset, check_requirements,
+                                  check_yaml, clean_str, cv2, is_colab, is_kaggle, segments2boxes, unzip_file, xyn2xy,
+                                  xywh2xyxy, xywhn2xyxy, xyxy2xywhn)
 from utils.torch_utils import torch_distributed_zero_first
 from utils.obb_utils import poly_filter, poly2obb
 
