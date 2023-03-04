@@ -213,7 +213,7 @@ def run(
     # dt, p, r, f1, mp, mr, map50, map = [0.0, 0.0, 0.0], 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
     dt = Profile(), Profile(), Profile()  # profiling times
     # loss = torch.zeros(3, device=device)
-    loss = torch.zeros(4, device=device)  # (box, obj, cls, angle)
+    loss = torch.zeros(5, device=device)  # (box, obj, cls, angle, pos)
     # for stats, it will save (correct, conf, pcls, tcls)
     jdict, stats, ap, ap_class = [], [], [], []
     callbacks.run('on_val_start')
@@ -242,8 +242,8 @@ def run(
 
         # Loss
         if compute_loss:
-            # return (lbox + lobj + lcls + langle) * bs, torch.cat((lbox, lobj, lcls, langle)).detach()
-            loss += compute_loss(train_out, targets)[1]  # box, obj, cls, angle
+            # return (lbox + lobj + lcls + langle + lpos) * bs, torch.cat((lbox, lobj, lcls, langle, lpos)).detach()
+            loss += compute_loss(train_out, targets)[1]  # box, obj, cls, angle, pos
 
         # NMS
         # as for my finger nail dataset,

@@ -118,10 +118,12 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
         # loggers instance for oriented bounding boxes
         loggers = Loggers(save_dir, weights, opt, hyp, LOGGER, keys=['train/box_loss', 'train/obj_loss',
                                                                      'train/cls_loss', 'train/theta_loss',
+                                                                     'train/pos_loss',
                                                                      'metrics/precision', 'metrics/recall',
                                                                      'metrics/HBBmAP.5', 'metrics/HBBmAP.5:.95',
                                                                      'val/box_loss', 'val/obj_loss',
                                                                      'val/cls_loss', 'val/theta_loss',
+                                                                     'val/pos_loss',
                                                                      'x/lr0', 'x/lr1', 'x/lr2'])
 
         # Register actions
@@ -274,6 +276,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
     hyp['cls'] *= nc / 80 * 3 / nl  # scale to classes and layers
     hyp['obj'] *= (imgsz / 640) ** 2 * 3 / nl  # scale to image size and layers
     hyp['angle'] *= 3 / nl  # scale to layers
+    hyp['pos'] *= 3 / nl  # scale to layers
     hyp['label_smoothing'] = opt.label_smoothing
     model.nc = nc  # attach number of classes to model
     model.hyp = hyp  # attach hyperparameter to model
@@ -288,7 +291,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
     # nw = min(nw, (epochs - start_epoch) / 2 * nb)  # limit warmup to < 1/2 of training
     last_opt_step = -1
     maps = np.zeros(nc)  # mAP per class
-    results = (0, 0, 0, 0, 0, 0, 0, 0)  # P, R, mAP@.5, mAP@.5-.95, val_loss(box, obj, cls, angle)
+    results = (0, 0, 0, 0, 0, 0, 0, 0, 0)  # P, R, mAP@.5, mAP@.5-.95, val_loss(box, obj, cls, angle, pos)
     scheduler.last_epoch = start_epoch - 1  # do not move
     # GradScaler can scale loss for avoiding overflow when use half flot
     # only during pass the gradient information
@@ -315,12 +318,12 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
         # dataset.mosaic_border = [b - imgsz, -b]  # height, width borders
 
         # mloss = torch.zeros(3, device=device)  # mean losses
-        mloss = torch.zeros(4, device=device)  # mean loss for (box, obj, cls, angle)
+        mloss = torch.zeros(5, device=device)  # mean loss for (box, obj, cls, angle, pos)
         if RANK != -1:
             train_loader.sampler.set_epoch(epoch)
         pbar = enumerate(train_loader)
-        LOGGER.info(('\n' + '%11s' * 8) % ('Epoch', 'GPU_mem', 'box_loss', 'obj_loss', 'cls_loss', 'angle_loss',
-                                           'Instances', 'Size'))
+        LOGGER.info(('\n' + '%11s' * 9) % ('Epoch', 'GPU_mem', 'box_loss', 'obj_loss', 'cls_loss', 'angle_loss',
+                                           'pos_loss', 'Instances', 'Size'))
         if RANK in {-1, 0}:
             pbar = tqdm(pbar, total=nb, bar_format=TQDM_BAR_FORMAT)  # progress bar
         optimizer.zero_grad()
@@ -394,7 +397,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
             if RANK in {-1, 0}:
                 mloss = (mloss * i + loss_items) / (i + 1)  # update mean losses
                 mem = f'{torch.cuda.memory_reserved() / 1E9 if torch.cuda.is_available() else 0:.3g}G'  # (GB)
-                pbar.set_description(('%11s' * 2 + '%11.4g' * 6) %
+                pbar.set_description(('%11s' * 2 + '%11.4g' * 7) %
                                      (f'{epoch}/{epochs - 1}', mem, *mloss, targets.shape[0], imgs.shape[-1]))
                 callbacks.run('on_train_batch_end', model, ni, imgs, targets, paths, list(mloss))
                 if callbacks.stop_training:
@@ -500,9 +503,9 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
 def parse_opt(known=False):
     parser = argparse.ArgumentParser()
     parser.add_argument('--weights', type=str, default=ROOT / 'yolov5m.pt', help='initial weights path')
-    parser.add_argument('--cfg', type=str, default=ROOT / 'models/yolov5m-obb.yaml', help='model.yaml path')
-    parser.add_argument('--data', type=str, default=ROOT / 'data/fingernail-obb.yaml', help='dataset.yaml path')
-    parser.add_argument('--hyp', type=str, default=ROOT / 'data/hyps/hyp.fingernail-obb.yaml',
+    parser.add_argument('--cfg', type=str, default=ROOT / 'models/yolov5m-obb-kp.yaml', help='model.yaml path')
+    parser.add_argument('--data', type=str, default=ROOT / 'data/fingernail-obb-kp.yaml', help='dataset.yaml path')
+    parser.add_argument('--hyp', type=str, default=ROOT / 'data/hyps/hyp.fingernail-obb-kp.yaml',
                         help='hyperparameters path')
     parser.add_argument('--epochs', type=int, default=3000, help='total training epochs')
     parser.add_argument('--batch-size', type=int, default=2, help='total batch size for all GPUs, -1 for autobatch')
@@ -537,13 +540,13 @@ def parse_opt(known=False):
     parser.add_argument('--optimizer', type=str, choices=['SGD', 'Adam', 'AdamW'], default='SGD', help='optimizer')
     parser.add_argument('--sync-bn', action='store_true', help='use SyncBatchNorm, only available in DDP mode')
     parser.add_argument('--workers', type=int, default=8, help='max dataloader workers (per RANK in DDP mode)')
-    parser.add_argument('--project', default=ROOT / 'fingernail-obb', help='save to project/name')
+    parser.add_argument('--project', default=ROOT / 'fingernail-obb-kp', help='save to project/name')
     parser.add_argument('--name', default='exp', help='save to project/name')
     parser.add_argument('--exist-ok', action='store_true', help='existing project/name ok, do not increment')
     parser.add_argument('--quad', action='store_true', help='quad dataloader')
     parser.add_argument('--cos-lr', action='store_true', help='cosine LR scheduler')
     parser.add_argument('--label-smoothing', type=float, default=0.0, help='Label smoothing epsilon')
-    parser.add_argument('--patience', type=int, default=100, help='EarlyStopping patience (epochs without improvement)')
+    parser.add_argument('--patience', type=int, default=50, help='EarlyStopping patience (epochs without improvement)')
     parser.add_argument('--freeze', nargs='+', type=int, default=[0], help='Freeze layers: backbone=10, first3=0 1 2')
     parser.add_argument('--save-period', type=int, default=-1, help='Save checkpoint every x epochs (disabled if < 1)')
     parser.add_argument('--seed', type=int, default=0, help='Global training seed')

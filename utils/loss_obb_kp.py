@@ -120,7 +120,7 @@ class ComputeLoss:
         g = h['fl_gamma']  # focal loss gamma
         if g > 0:
             BCEcls, BCEobj, BCEangle, MSEpos = FocalLoss(BCEcls, g), FocalLoss(BCEobj, g), \
-                FocalLoss(BCEangle, g), FocalLoss(MSEpos, g)
+                FocalLoss(BCEangle, g), MSEpos
 
         m = de_parallel(model).model[-1]  # Detect() module
         self.stride = m.stride  # tensor([8, 16, 32,...])
@@ -170,6 +170,11 @@ class ComputeLoss:
                 # pbox.shape = tbox[i].shape = [num_gt, 4]
                 iou = bbox_iou(pbox, tbox[i], CIoU=True).squeeze()  # iou(prediction, target)
                 lbox += (1.0 - iou).mean()  # iou loss
+
+                # Regression for bounding box center with MSE loss
+                predict_cxy = pxy.sigmoid()
+                target_cxy = tbox[i][:, :2]
+                lpos += self.MSEpos(predict_cxy, target_cxy)
 
                 # Objectness
                 iou = iou.detach().clamp(0).type(tobj.dtype)
